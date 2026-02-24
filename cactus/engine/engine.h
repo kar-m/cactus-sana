@@ -64,6 +64,10 @@ struct Config {
     float routed_scaling_factor = 1.0f;
     bool tie_word_embeddings = true;
 
+    uint32_t gemma_version = 3;
+    bool use_qk_norm = true;
+    float attn_logit_softcapping = 0.0f;
+
     uint32_t vision_hidden_dim = 0;
     uint32_t vision_num_layers = 0;
     uint32_t vision_attention_heads = 0;

@@ -438,6 +438,9 @@ bool Config::from_json(const std::string& config_path) {
         else if (key == "use_expert_bias") use_expert_bias = (value == "true" || value == "1");
         else if (key == "routed_scaling_factor") routed_scaling_factor = std::stof(value);
         else if (key == "tie_word_embeddings") tie_word_embeddings = (value == "true" || value == "1");
+        else if (key == "gemma_version") gemma_version = static_cast<uint32_t>(std::stoul(value));
+        else if (key == "use_qk_norm") use_qk_norm = (value == "true" || value == "1");
+        else if (key == "attn_logit_softcapping") attn_logit_softcapping = std::stof(value);
         else if (key == "vision_hidden_dim") vision_hidden_dim = static_cast<uint32_t>(std::stoul(value));
         else if (key == "vision_num_layers") vision_num_layers = static_cast<uint32_t>(std::stoul(value));
         else if (key == "vision_attention_heads") vision_attention_heads = static_cast<uint32_t>(std::stoul(value));

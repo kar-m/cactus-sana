@@ -38,8 +38,10 @@ void GemmaModel::load_weights_to_graph(CactusGraph* gb) {
         layer.attn_v_weight = gb->mmap_weights(layer_prefix + "attn_v.weights");
         layer.attn_output_weight = gb->mmap_weights(layer_prefix + "attn_output.weights");
         layer.input_layernorm_weight = gb->mmap_weights(layer_prefix + "input_norm.weights");
-        layer.attn_q_norm_weight = gb->mmap_weights(layer_prefix + "attn_q_norm.weights");
-        layer.attn_k_norm_weight = gb->mmap_weights(layer_prefix + "attn_k_norm.weights");
+        if (config_.use_qk_norm) {
+            layer.attn_q_norm_weight = gb->mmap_weights(layer_prefix + "attn_q_norm.weights");
+            layer.attn_k_norm_weight = gb->mmap_weights(layer_prefix + "attn_k_norm.weights");
+        }
         layer.ffn_gate_weight = gb->mmap_weights(layer_prefix + "ffn_gate.weights");
         layer.ffn_up_weight = gb->mmap_weights(layer_prefix + "ffn_up.weights");
         layer.ffn_down_weight = gb->mmap_weights(layer_prefix + "ffn_down.weights");
@@ -67,12 +69,16 @@ size_t GemmaModel::build_attention(CactusGraph* gb, size_t normalized_input, uin
     size_t num_heads = config_.attention_heads;
     size_t head_dim = config_.attention_head_dim;
     q_proj = gb->reshape(q_proj, {batch_seq * num_heads, head_dim});
-    q_proj = gb->rms_norm(q_proj, layer.attn_q_norm_weight, config_.layer_norm_eps);
+    if (config_.use_qk_norm) {
+        q_proj = gb->rms_norm(q_proj, layer.attn_q_norm_weight, config_.layer_norm_eps);
+    }
     q_proj = gb->reshape(q_proj, {batch_seq, num_heads * head_dim});
 
     size_t num_kv_heads = config_.attention_kv_heads;
     k_proj = gb->reshape(k_proj, {batch_seq * num_kv_heads, head_dim});
-    k_proj = gb->rms_norm(k_proj, layer.attn_k_norm_weight, config_.layer_norm_eps);
+    if (config_.use_qk_norm) {
+        k_proj = gb->rms_norm(k_proj, layer.attn_k_norm_weight, config_.layer_norm_eps);
+    }
     k_proj = gb->reshape(k_proj, {batch_seq, num_kv_heads * head_dim});
 
     size_t seq_len = batch_seq;
@@ -81,10 +87,23 @@ size_t GemmaModel::build_attention(CactusGraph* gb, size_t normalized_input, uin
     auto k_proj_4d = gb->reshape(k_proj, {1, seq_len, config_.attention_kv_heads, config_.attention_head_dim});
     auto v_proj_4d = gb->reshape(v_proj, {1, seq_len, config_.attention_kv_heads, config_.attention_head_dim});
 
-    bool is_global_attention = ((layer_idx + 1) % 6) == 0;
+    bool is_global_attention;
+    size_t window_size = 0;
+    if (config_.gemma_version == 3) {
+        is_global_attention = ((layer_idx + 1) % 6) == 0;
+        window_size = is_global_attention ? 0 : 512;
+    } else {
+        is_global_attention = (layer_idx % 2) != 0;
+        window_size = is_global_attention ? 0 : 4096;
+    }
 
     if (config_.rope_theta > 0) {
-        float rope_freq = is_global_attention ? 1000000.0f : 10000.0f;
+        float rope_freq = config_.rope_theta;
+        if (config_.gemma_version == 3 && is_global_attention) {
+            rope_freq = 1000000.0f;
+        } else {
+            rope_freq = 10000.0f;
+        }
 
         q_proj_4d = gb->rope(q_proj_4d, rope_freq, position_offset);
         k_proj_4d = gb->rope(k_proj_4d, rope_freq, position_offset);
@@ -96,7 +115,6 @@ size_t GemmaModel::build_attention(CactusGraph* gb, size_t normalized_input, uin
     }
 
     size_t attn_output_4d;
-    size_t window_size = is_global_attention ? 0 : 512;
 
     if (use_cache && !kv_cache_.is_empty()) {
         attn_output_4d = gb->attention_int8_hybrid(
@@ -111,6 +129,10 @@ size_t GemmaModel::build_attention(CactusGraph* gb, size_t normalized_input, uin
     } else {
         attn_output_4d = gb->attention(q_proj_4d, k_proj_4d, v_proj_4d, attention_scale_, position_offset, window_size);
     }
+    
+    // NOTE: Soft-capping is skipped because `CactusGraph::attention` does not currently accept a `soft_cap` argument. 
+    // It would be implemented here or inside the `attention` op directly.
+
     auto attn_output = gb->reshape(attn_output_4d, {seq_len, config_.attention_head_dim * config_.attention_heads});
     return gb->matmul(attn_output, layer.attn_output_weight, true, backend);
 }
