@@ -453,6 +453,75 @@ void cactus_conv1d_f16(
     conv1d_f16_neon(input, weight, bias, output, N, L, C_in, C_out, K, stride);
 }
 
+void cactus_conv2d_f16(
+    const __fp16* input,
+    const __fp16* weight,
+    const __fp16* bias,
+    __fp16* output,
+    size_t N,
+    size_t H,
+    size_t W,
+    size_t C_in,
+    size_t C_out,
+    size_t KH,
+    size_t KW,
+    size_t stride_h,
+    size_t stride_w,
+    size_t padding_h,
+    size_t padding_w,
+    size_t dilation_h,
+    size_t dilation_w,
+    size_t groups
+) {
+    size_t H_out = (H + 2 * padding_h - dilation_h * (KH - 1) - 1) / stride_h + 1;
+    size_t W_out = (W + 2 * padding_w - dilation_w * (KW - 1) - 1) / stride_w + 1;
+
+    size_t in_channels_per_group = C_in / groups;
+    size_t out_channels_per_group = C_out / groups;
+
+    size_t in_bs = C_in * H * W;
+    size_t out_bs = C_out * H_out * W_out;
+    size_t w_bs = in_channels_per_group * KH * KW; // Weight size per output channel
+
+    const size_t total_compute = N * C_out * H_out * W_out * in_channels_per_group * KH * KW;
+    CactusThreading::ParallelConfig config = (total_compute < 100000)
+        ? CactusThreading::ParallelConfig{SIZE_MAX, SIZE_MAX}
+        : CactusThreading::Thresholds::ATTENTION;
+
+    CactusThreading::parallel_for_2d(N, C_out, config, [&](size_t n, size_t oc) {
+        size_t g = oc / out_channels_per_group;
+        const __fp16* Xb = input + n * in_bs;
+        const __fp16* Woc = weight + oc * w_bs;
+        __fp16* Yoc = output + n * out_bs + oc * (H_out * W_out);
+        float b = bias ? (float)bias[oc] : 0.0f;
+
+        for (size_t oh = 0; oh < H_out; ++oh) {
+            for (size_t ow = 0; ow < W_out; ++ow) {
+                float sum = b;
+                for (size_t ic = 0; ic < in_channels_per_group; ++ic) {
+                    size_t actual_ic = g * in_channels_per_group + ic;
+                    const __fp16* Xc = Xb + actual_ic * (H * W);
+                    const __fp16* Wc = Woc + ic * (KH * KW);
+
+                    for (size_t kh = 0; kh < KH; ++kh) {
+                        for (size_t kw = 0; kw < KW; ++kw) {
+                            ptrdiff_t ih = (ptrdiff_t)(oh * stride_h) - (ptrdiff_t)padding_h + (ptrdiff_t)(kh * dilation_h);
+                            ptrdiff_t iw = (ptrdiff_t)(ow * stride_w) - (ptrdiff_t)padding_w + (ptrdiff_t)(kw * dilation_w);
+
+                            if (ih >= 0 && ih < (ptrdiff_t)H && iw >= 0 && iw < (ptrdiff_t)W) {
+                                float val = (float)Xc[ih * W + iw];
+                                float w_val = (float)Wc[kh * KW + kw];
+                                sum += val * w_val;
+                            }
+                        }
+                    }
+                }
+                Yoc[oh * W_out + ow] = (__fp16)sum;
+            }
+        }
+    });
+}
+
 inline void conv1d_k7s3_oc8_t4(
     const __fp16* Xb,
     const __fp16* Wpack,

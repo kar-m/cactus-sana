@@ -130,12 +130,37 @@ CACTUS_FFI_EXPORT int cactus_vad(
     size_t pcm_buffer_size
 );
 
+CACTUS_FFI_EXPORT int cactus_generate_image(
+    cactus_model_t model,
+    const char* prompt,
+    size_t width,
+    size_t height,
+    char* response_buffer,
+    size_t buffer_size
+);
+
+CACTUS_FFI_EXPORT int cactus_generate_image_to_image(
+    cactus_model_t model,
+    const char* prompt,
+    const char* init_image_path,
+    size_t width,
+    size_t height,
+    float strength,
+    char* response_buffer,
+    size_t buffer_size
+);
+
 CACTUS_FFI_EXPORT int cactus_rag_query(
     cactus_model_t model,
     const char* query,
     char* response_buffer,
     size_t buffer_size,
     size_t top_k
+);
+
+CACTUS_FFI_EXPORT void* cactus_get_output(
+    cactus_model_t model,
+    size_t node_id
 );
 
 

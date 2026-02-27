@@ -4,6 +4,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <set>
+#include <fstream>
 
 namespace cactus {
 namespace engine {
@@ -39,8 +40,16 @@ void GemmaModel::load_weights_to_graph(CactusGraph* gb) {
         layer.attn_output_weight = gb->mmap_weights(layer_prefix + "attn_output.weights");
         layer.input_layernorm_weight = gb->mmap_weights(layer_prefix + "input_norm.weights");
         if (config_.use_qk_norm) {
-            layer.attn_q_norm_weight = gb->mmap_weights(layer_prefix + "attn_q_norm.weights");
-            layer.attn_k_norm_weight = gb->mmap_weights(layer_prefix + "attn_k_norm.weights");
+            const std::string q_norm_path = layer_prefix + "attn_q_norm.weights";
+            const std::string k_norm_path = layer_prefix + "attn_k_norm.weights";
+            std::ifstream q_norm_file(q_norm_path);
+            std::ifstream k_norm_file(k_norm_path);
+            if (q_norm_file.good() && k_norm_file.good()) {
+                layer.attn_q_norm_weight = gb->mmap_weights(q_norm_path);
+                layer.attn_k_norm_weight = gb->mmap_weights(k_norm_path);
+            } else {
+                config_.use_qk_norm = false;
+            }
         }
         layer.ffn_gate_weight = gb->mmap_weights(layer_prefix + "ffn_gate.weights");
         layer.ffn_up_weight = gb->mmap_weights(layer_prefix + "ffn_up.weights");

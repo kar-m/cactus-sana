@@ -125,14 +125,14 @@ enum class OpType {
     MATMUL, TRANSPOSE, RESHAPE, SLICE, GATHER, EMBEDDING,
     BILINEAR_INTERPOLATION,
     SUM, MEAN, VARIANCE, MIN, MAX,
-    RMS_NORM, ROPE, ROPE_GPTJ, SOFTMAX, ATTENTION, ATTENTION_INT8_HYBRID, CONV1D_CAUSAL, CONV1D_K3, CONV1D_K7S3, CONV1D,
+    RMS_NORM, ROPE, ROPE_GPTJ, SOFTMAX, ATTENTION, ATTENTION_INT8_HYBRID, LINEAR_ATTENTION, CONV1D_CAUSAL, CONV1D_K3, CONV1D_K7S3, CONV1D, CONV2D,
     SCALAR_ADD, SCALAR_SUBTRACT, SCALAR_MULTIPLY, SCALAR_DIVIDE, SCALAR_EXP, SCALAR_SQRT, SCALAR_COS, SCALAR_SIN, SCALAR_LOG,
     RELU, SILU, GELU, GELU_ERF, SIGMOID, TANH,
     SAMPLE, CONCAT,
     SCATTER_TOPK,
     TOPK, LAYERNORM, GROUPNORM,
     MOE_LAYER,
-    INDEX,
+    INDEX, REPEAT_INTERLEAVE,
     PERSISTENT,
     QUANTIZE_ACTIVATIONS,
     LSTM_CELL,
@@ -319,9 +319,16 @@ struct OpParams {
     Precision output_precision = Precision::INT8;
     BroadcastInfo broadcast_info;
     ComputeBackend backend = ComputeBackend::CPU;
-
+    
     size_t dilation = 1;
     size_t stride = 1;
+    size_t stride_h = 1;
+    size_t stride_w = 1;
+    size_t padding_h = 0;
+    size_t padding_w = 0;
+    size_t dilation_h = 1;
+    size_t dilation_w = 1;
+    size_t groups = 1;
     float temperature = 1.0f;
     float top_p = 1.0f;
     size_t top_k = 0;
@@ -482,6 +489,7 @@ public:
 
     size_t layernorm(size_t input, size_t weight, size_t bias, float epsilon = 1e-5f);
     size_t layernorm(size_t input, size_t weight, float epsilon = 1e-5f);  // No bias version
+    size_t layernorm(size_t input, float epsilon = 1e-5f); // No affine version
     size_t groupnorm(size_t input, size_t weight, size_t bias, size_t num_groups = 32, float epsilon = 1e-5f);
     size_t topk(size_t input, size_t k);
     size_t moe_layer(size_t hidden,
@@ -513,6 +521,8 @@ public:
     size_t attention(size_t query, size_t key, size_t value, float scale, bool is_causal = true, ComputeBackend backend = ComputeBackend::CPU);
     size_t attention(size_t query, size_t key, size_t value, float scale, size_t position_offset, ComputeBackend backend = ComputeBackend::CPU);
     size_t attention(size_t query, size_t key, size_t value, float scale, size_t position_offset, size_t window_size, ComputeBackend backend = ComputeBackend::CPU);
+    
+    size_t linear_attention(size_t query, size_t key, size_t value, float scale, ComputeBackend backend = ComputeBackend::CPU);
 
     size_t attention_int8_hybrid(size_t query, size_t key_new, size_t value_new, float scale, size_t position_offset,
                                  const int8_t* cached_keys, const int8_t* cached_values,
@@ -522,11 +532,13 @@ public:
     size_t conv1d_causal(size_t input, size_t weight, size_t kernel_size, size_t dilation = 1);
     size_t conv1d_k3(size_t input, size_t weight, size_t stride);
     size_t conv1d_k7s3(size_t input, size_t weight, size_t bias);
+    size_t conv2d(size_t input, size_t weight, size_t bias = 0, size_t stride_h = 1, size_t stride_w = 1, size_t padding_h = 0, size_t padding_w = 0, size_t dilation_h = 1, size_t dilation_w = 1, size_t groups = 1);
     size_t conv1d(size_t input, size_t weight, size_t stride);
     size_t conv1d(size_t input, size_t weight, size_t bias, size_t stride);
 
     size_t lstm_cell(size_t input, size_t h_prev, size_t c_prev, size_t weight_ih, size_t weight_hh, size_t bias_ih, size_t bias_hh);
     size_t stft(size_t input, size_t weight, size_t stride, size_t num_fft_bins);
+    size_t repeat_interleave(size_t input, size_t repeats, int axis);
 
     size_t sample(size_t logits, float temperature = 0.6f, float top_p = 0.95f, size_t top_k = 20,
                   const std::unordered_map<uint32_t, float>& logit_bias = {});

@@ -95,6 +95,18 @@ _lib.cactus_vad.argtypes = [
 ]
 _lib.cactus_vad.restype = ctypes.c_int
 
+_lib.cactus_generate_image.argtypes = [
+    ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_size_t,
+    ctypes.c_char_p, ctypes.c_size_t
+]
+_lib.cactus_generate_image.restype = ctypes.c_int
+
+_lib.cactus_generate_image_to_image.argtypes = [
+    ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_size_t,
+    ctypes.c_float, ctypes.c_char_p, ctypes.c_size_t
+]
+_lib.cactus_generate_image_to_image.restype = ctypes.c_int
+
 _lib.cactus_reset.argtypes = [ctypes.c_void_p]
 _lib.cactus_reset.restype = None
 
@@ -128,11 +140,10 @@ _lib.cactus_score_window.argtypes = [
 ]
 _lib.cactus_score_window.restype = ctypes.c_int
 
-_lib.cactus_rag_query.argtypes = [
-    ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p,
-    ctypes.c_size_t, ctypes.c_size_t
-]
 _lib.cactus_rag_query.restype = ctypes.c_int
+
+_lib.cactus_get_output.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+_lib.cactus_get_output.restype = ctypes.c_void_p
 
 _lib.cactus_stream_transcribe_start.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 _lib.cactus_stream_transcribe_start.restype = ctypes.c_void_p
@@ -465,6 +476,72 @@ def cactus_vad(model, audio_path=None, pcm_data=None, options=None):
         )
 
     return buf.value.decode("utf-8", errors="ignore")
+
+
+def cactus_generate_image(model, prompt, width=1024, height=1024):
+    """
+    Generate an image from a text prompt using a Sana model.
+
+    Args:
+        model: Model handle from cactus_init (must be a Sana model)
+        prompt: Text prompt describing the image to generate
+        width: Output image width (default: 1024)
+        height: Output image height (default: 1024)
+
+    Returns:
+        JSON string with response: {"success": bool, "total_time_ms": float, ...}
+    """
+    buf = ctypes.create_string_buffer(65536)
+    _lib.cactus_generate_image(
+        model,
+        prompt.encode() if isinstance(prompt, str) else prompt,
+        width,
+        height,
+        buf, len(buf)
+    )
+    return buf.value.decode("utf-8", errors="ignore")
+
+
+def cactus_generate_image_to_image(model, prompt, init_image_path, width=1024, height=1024, strength=0.6):
+    """
+    Generate an image from an input image + prompt using a Sana model.
+
+    Args:
+        model: Model handle from cactus_init (must be a Sana model)
+        prompt: Text prompt describing the desired transformation
+        init_image_path: Path to the source image
+        width: Output image width (default: 1024)
+        height: Output image height (default: 1024)
+        strength: Noise strength in [0, 1], larger means larger edit (default: 0.6)
+
+    Returns:
+        JSON string with response including output_node and timing stats.
+    """
+    buf = ctypes.create_string_buffer(65536)
+    _lib.cactus_generate_image_to_image(
+        model,
+        prompt.encode() if isinstance(prompt, str) else prompt,
+        init_image_path.encode() if isinstance(init_image_path, str) else init_image_path,
+        width,
+        height,
+        ctypes.c_float(strength),
+        buf, len(buf)
+    )
+    return buf.value.decode("utf-8", errors="ignore")
+
+
+def cactus_get_output(model, node_id):
+    """
+    Get raw graph output buffer pointer.
+
+    Args:
+        model: Model handle
+        node_id: ID of the graph node to get output for
+
+    Returns:
+        ctypes void_p to the buffer
+    """
+    return _lib.cactus_get_output(model, node_id)
 
 
 def cactus_reset(model):

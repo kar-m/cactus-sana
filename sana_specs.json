@@ -1,0 +1,137 @@
+{
+  "transformer_config": {
+    "in_channels": 32,
+    "out_channels": 32,
+    "num_attention_heads": 70,
+    "attention_head_dim": 32,
+    "num_layers": 20,
+    "num_cross_attention_heads": 20,
+    "cross_attention_head_dim": 112,
+    "cross_attention_dim": 2240,
+    "caption_channels": 2304,
+    "mlp_ratio": 2.5,
+    "dropout": 0.0,
+    "attention_bias": false,
+    "sample_size": 32,
+    "patch_size": 1,
+    "norm_elementwise_affine": false,
+    "norm_eps": 1e-06,
+    "interpolation_scale": null,
+    "guidance_embeds": true,
+    "guidance_embeds_scale": 0.1,
+    "qk_norm": "rms_norm_across_heads",
+    "timestep_scale": 1.0,
+    "_use_default_values": [
+      "timestep_scale"
+    ],
+    "_class_name": "SanaTransformer2DModel",
+    "_diffusers_version": "0.33.0.dev0",
+    "_name_or_path": "/Users/karen/.cache/huggingface/hub/models--Efficient-Large-Model--Sana_Sprint_1.6B_1024px_diffusers/snapshots/b3c9ce6f29ad4161a00fa58a62e476b9c75ca934/transformer"
+  },
+  "vae_config": {
+    "in_channels": 3,
+    "latent_channels": 32,
+    "attention_head_dim": 32,
+    "encoder_block_types": [
+      "ResBlock",
+      "ResBlock",
+      "ResBlock",
+      "EfficientViTBlock",
+      "EfficientViTBlock",
+      "EfficientViTBlock"
+    ],
+    "decoder_block_types": [
+      "ResBlock",
+      "ResBlock",
+      "ResBlock",
+      "EfficientViTBlock",
+      "EfficientViTBlock",
+      "EfficientViTBlock"
+    ],
+    "encoder_block_out_channels": [
+      128,
+      256,
+      512,
+      512,
+      1024,
+      1024
+    ],
+    "decoder_block_out_channels": [
+      128,
+      256,
+      512,
+      512,
+      1024,
+      1024
+    ],
+    "encoder_layers_per_block": [
+      2,
+      2,
+      2,
+      3,
+      3,
+      3
+    ],
+    "decoder_layers_per_block": [
+      3,
+      3,
+      3,
+      3,
+      3,
+      3
+    ],
+    "encoder_qkv_multiscales": [
+      [],
+      [],
+      [],
+      [
+        5
+      ],
+      [
+        5
+      ],
+      [
+        5
+      ]
+    ],
+    "decoder_qkv_multiscales": [
+      [],
+      [],
+      [],
+      [
+        5
+      ],
+      [
+        5
+      ],
+      [
+        5
+      ]
+    ],
+    "upsample_block_type": "interpolate",
+    "downsample_block_type": "Conv",
+    "decoder_norm_types": "rms_norm",
+    "decoder_act_fns": "silu",
+    "encoder_out_shortcut": true,
+    "decoder_in_shortcut": true,
+    "decoder_conv_act_fn": "relu",
+    "scaling_factor": 0.41407,
+    "_use_default_values": [
+      "decoder_in_shortcut",
+      "encoder_out_shortcut",
+      "decoder_conv_act_fn"
+    ],
+    "_class_name": "AutoencoderDC",
+    "_diffusers_version": "0.33.0.dev0",
+    "_name_or_path": "/Users/karen/.cache/huggingface/hub/models--Efficient-Large-Model--Sana_Sprint_1.6B_1024px_diffusers/snapshots/b3c9ce6f29ad4161a00fa58a62e476b9c75ca934/vae"
+  },
+  "scheduler_config": {
+    "num_train_timesteps": 1000,
+    "prediction_type": "trigflow",
+    "sigma_data": 0.5,
+    "_class_name": "SCMScheduler",
+    "_diffusers_version": "0.33.0.dev0"
+  },
+  "vae_modules_count": 310,
+  "transformer_modules_count": 417
+}

@@ -1,0 +1,65 @@
+#pragma once
+
+#include "model.h"
+
+namespace cactus {
+namespace engine {
+
+class SanaModel : public Model {
+public:
+    SanaModel();
+    explicit SanaModel(const Config& config);
+    ~SanaModel() override;
+
+    bool init(const std::string& model_folder, size_t context_size, const std::string& system_prompt = "", bool do_warmup = true) override;
+    size_t generate_image(const std::string& prompt, size_t width, size_t height) override;
+    size_t generate_image_to_image(const std::string& prompt, const std::string& init_image_path,
+                                   size_t width, size_t height, float strength = 0.6f) override;
+    void* get_output_pointer(size_t encoded_node_id) const;
+    
+protected:
+    size_t forward(const std::vector<uint32_t>& tokens, bool use_cache = false) override;
+    void load_weights_to_graph(CactusGraph* gb) override;
+    size_t build_attention(CactusGraph* gb, size_t normalized_input, uint32_t layer_idx, ComputeBackend backend, bool use_cache = false, size_t position_offset = 0) override;
+    size_t build_mlp(CactusGraph* gb, size_t normalized_h, uint32_t layer_idx, ComputeBackend backend) const override;
+    size_t build_transformer_block(CactusGraph* gb, size_t hidden, uint32_t layer_idx, ComputeBackend backend, bool use_cache = false, size_t position_offset = 0) override;
+
+private:
+    static constexpr size_t kMaxPromptTokens = 300;
+    static constexpr size_t kTimestepDim = 256;
+    static constexpr float kFlowShift = 3.0f;
+    std::vector<__fp16> encode_prompt_to_fp16(const std::string& prompt) const;
+    std::vector<__fp16> make_noise_latents(size_t total_latents) const;
+    std::vector<__fp16> make_image_conditioned_latents(const std::string& image_path, size_t width, size_t height) const;
+    size_t run_diffusion(const std::vector<__fp16>& prompt_embeds, std::vector<__fp16>& current_latents, size_t steps) const;
+    size_t decode_latents(const std::vector<__fp16>& final_latents);
+    void validate_dimensions(size_t width, size_t height) const;
+
+    static constexpr size_t kDecoderNodeFlag = (size_t(1) << (sizeof(size_t) * 8 - 1));
+
+    std::unique_ptr<Model> text_encoder_;
+
+    size_t prompt_embeds_node_ = 0;
+    size_t latents_node_ = 0;
+    size_t timestep_node_ = 0;
+    size_t dt_node_ = 0;
+    size_t next_latents_node_ = 0;
+    size_t denoiser_output_node_ = 0;
+
+    void* decoder_graph_handle_ = nullptr;
+    size_t decoder_latents_node_ = 0;
+    size_t decoder_output_node_ = 0;
+    void* encoder_graph_handle_ = nullptr;
+    size_t encoder_image_node_ = 0;
+    size_t encoder_latents_node_ = 0;
+    bool has_vae_encoder_ = false;
+
+    size_t text_encoder_dim_ = 2304;
+    size_t latent_channels_ = 32;
+    size_t latents_h_ = 32;
+    size_t latents_w_ = 32;
+    size_t diffusion_steps_ = 12;
+};
+
+}
+}
