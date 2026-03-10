@@ -2,8 +2,10 @@
 #include "sana_vae_ops.h"
 
 #include <cstring>
+#include <fstream>
 #include <stdexcept>
 #include <vector>
+#include <iostream>
 
 namespace cactus {
 namespace engine {
@@ -17,8 +19,19 @@ std::vector<__fp16> SanaModel::make_image_conditioned_latents(const std::string&
         throw std::runtime_error("Failed to read init image for img2img: " + image_path);
     }
 
-    auto resized = resize_rgb_bilinear(image, src_w, src_h, static_cast<int>(width), static_cast<int>(height));
+    // Center-crop to square before resizing to preserve aspect ratio
+    const int crop_size = std::min(src_w, src_h);
+    const int crop_x = (src_w - crop_size) / 2;
+    const int crop_y = (src_h - crop_size) / 2;
+    std::vector<uint8_t> cropped(crop_size * crop_size * 3);
+    for (int y = 0; y < crop_size; ++y) {
+        const uint8_t* src_row = image + ((crop_y + y) * src_w + crop_x) * 3;
+        std::memcpy(cropped.data() + y * crop_size * 3, src_row, crop_size * 3);
+    }
     stbi_image_free(image);
+
+    auto resized = resize_rgb_bilinear(cropped.data(), crop_size, crop_size,
+                                       static_cast<int>(width), static_cast<int>(height));
 
     if (has_vae_encoder_ && encoder_graph_handle_) {
         std::vector<__fp16> image_nchw(3 * width * height);
@@ -57,6 +70,9 @@ std::vector<__fp16> SanaModel::make_image_conditioned_latents(const std::string&
                 latents[i] = static_cast<__fp16>(src[i]);
             }
         }
+        // Scale encoded latents into denoiser latent space
+        for (size_t i = 0; i < expected; ++i)
+            latents[i] = static_cast<__fp16>(static_cast<float>(latents[i]) * kScalingFactor);
         return latents;
     }
 
@@ -69,8 +85,23 @@ size_t SanaModel::decode_latents(const std::vector<__fp16>& final_latents) {
         throw std::runtime_error("Sana decoder graph is not initialized.");
     }
 
-    decoder->set_input(decoder_latents_node_, final_latents.data(), Precision::FP16);
+    // Unscale latents: denoiser works in scaled space (x kScalingFactor), DC-AE decoder expects unscaled
+    const size_t n = final_latents.size();
+    std::vector<__fp16> unscaled(n);
+    for (size_t i = 0; i < n; ++i)
+        unscaled[i] = static_cast<__fp16>(static_cast<float>(final_latents[i]) / kScalingFactor);
+
+    if (const char* dump_path = std::getenv("CACTUS_SANA_LATENT_DUMP")) {
+        std::ofstream f(dump_path, std::ios::binary);
+        if (f) {
+            f.write(reinterpret_cast<const char*>(unscaled.data()), n * sizeof(__fp16));
+            std::cout << "[Sana] Dumped " << n << " fp16 latents to " << dump_path << std::endl;
+        }
+    }
+    std::cout << "[Sana] Decoding latents with DCAE..." << std::flush;
+    decoder->set_input(decoder_latents_node_, unscaled.data(), Precision::FP16);
     decoder->execute();
+    std::cout << " done." << std::endl;
     return kDecoderNodeFlag | decoder_output_node_;
 }
 

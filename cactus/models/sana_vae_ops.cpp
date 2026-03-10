@@ -5,6 +5,7 @@
 #include <cmath>
 #include <fstream>
 #include <vector>
+#include <iostream>
 
 namespace cactus {
 namespace engine {
@@ -32,11 +33,15 @@ size_t build_res_block(CactusGraph* gb, size_t input, const std::string& prefix,
     size_t N = shape[0], H = shape[1], W = shape[2], C = shape[3];
     x = gb->reshape(x, {N * H * W, C});
     size_t w_norm = gb->mmap_weights(model_folder + "/" + prefix + ".norm.weight.weights");
-    x = gb->rms_norm(x, w_norm, 1e-6);
+    size_t b_norm = gb->mmap_weights(model_folder + "/" + prefix + ".norm.bias.weights");
+    x = gb->rms_norm(x, w_norm, 1e-5f);
+    x = gb->add(x, b_norm);
     x = gb->reshape(x, {N, H, W, C});
     x = gb->transposeN(x, {0, 3, 1, 2}); // (N, H, W, C) -> (N, C, H, W)
 
-    return gb->add(x, input);
+    size_t out = gb->add(x, input);
+    gb->register_debug_node(1, prefix + ".out", out);
+    return out;
 }
 
 size_t build_dc_down_block(CactusGraph* gb, size_t input, const std::string& prefix, const std::string& model_folder, size_t in_channels, size_t out_channels, bool downsample) {
@@ -71,15 +76,18 @@ size_t build_dc_down_block(CactusGraph* gb, size_t input, const std::string& pre
 }
 
 size_t build_dc_up_block(CactusGraph* gb, size_t input, const std::string& prefix, const std::string& model_folder, size_t in_channels, size_t out_channels) {
-    // Interpolate input nearest by 2x
-    size_t x = gb->repeat_interleave(input, 2, 2); // H x 2
-    x = gb->repeat_interleave(x, 2, 3); // W x 2
+    // DCUpBlock2d with interpolate=True (this model uses upsample_block_type="interpolate"):
+    // main path: nearest-neighbor 2x upsample, then conv(in_channels -> out_channels, 3x3)
+    // shortcut:  repeat_interleave(input, out_channels*4/in_channels, axis=1) then pixel_shuffle(2)
 
+    // Main path: nearest-neighbor 2x spatial upsample + conv
+    size_t x = gb->repeat_interleave(input, 2, 2); // [N, C, H*2, W]
+    x = gb->repeat_interleave(x, 2, 3);             // [N, C, H*2, W*2]
     size_t w = gb->mmap_weights(model_folder + "/" + prefix + ".conv.weight.weights");
     size_t b = gb->mmap_weights(model_folder + "/" + prefix + ".conv.bias.weights");
-    x = gb->conv2d(x, w, b, 1, 1, 1, 1);
+    x = gb->conv2d(x, w, b, 1, 1, 1, 1);  // [N, out_channels, H*2, W*2]
 
-    // Pixel shuffle logic for shortcut
+    // Shortcut: pixel_shuffle (channel->spatial expansion)
     auto expand_spatial = [&](size_t t, size_t c4) {
         auto shape = gb->get_output_buffer(t).shape;
         size_t N = shape[0], H = shape[2], W = shape[3];
@@ -89,8 +97,8 @@ size_t build_dc_up_block(CactusGraph* gb, size_t input, const std::string& prefi
     };
 
     size_t repeats = out_channels * 4 / in_channels;
-    size_t y = gb->repeat_interleave(input, repeats, 1); // axis=1 (channel)
-    y = expand_spatial(y, in_channels * repeats); // in_channels * repeats == out_channels * 4
+    size_t y = gb->repeat_interleave(input, repeats, 1);  // [N, in_channels*repeats = out_channels*4, H, W]
+    y = expand_spatial(y, in_channels * repeats);          // [N, out_channels, H*2, W*2]
 
     return gb->add(x, y);
 }
@@ -99,20 +107,10 @@ size_t build_autoencoderdc_glumbconv(CactusGraph* gb, size_t input, const std::s
     size_t x = input; // N, C, H, W
     size_t hidden_channels = 4 * dim;
 
-    // norm (RMSNorm)
+    // Save residual
     size_t res = x;
-    size_t w_norm = gb->mmap_weights(model_folder + "/" + prefix + ".norm.weight.weights");
-    size_t b_norm = gb->mmap_weights(model_folder + "/" + prefix + ".norm.bias.weights");
-    x = gb->transposeN(x, {0, 2, 3, 1}); // N, C, H, W -> N, H, W, C
-    auto shape = gb->get_output_buffer(x).shape;
-    size_t N = shape[0], H = shape[1], W = shape[2], C = shape[3];
-    x = gb->reshape(x, {N * H * W, C});
-    x = gb->rms_norm(x, w_norm, 1e-6f);
-    x = gb->add(x, b_norm);
-    x = gb->reshape(x, {N, H, W, C});
-    x = gb->transposeN(x, {0, 3, 1, 2}); // N, H, W, C -> N, C, H, W
 
-    // conv_inverted
+    // conv_inverted, then SiLU on all channels (HF: act before conv_depth)
     size_t w_inv = gb->mmap_weights(model_folder + "/" + prefix + ".conv_inverted.weight.weights");
     size_t b_inv = gb->mmap_weights(model_folder + "/" + prefix + ".conv_inverted.bias.weights");
     x = gb->conv2d(x, w_inv, b_inv, 1, 1, 0, 0);
@@ -123,7 +121,7 @@ size_t build_autoencoderdc_glumbconv(CactusGraph* gb, size_t input, const std::s
     size_t b_dep = gb->mmap_weights(model_folder + "/" + prefix + ".conv_depth.bias.weights");
     x = gb->conv2d(x, w_dep, b_dep, 1, 1, 1, 1, 1, 1, hidden_channels * 2);
 
-    // chunk into hidden and gate
+    // chunk into hidden and gate, SiLU on gate only
     size_t hidden = gb->slice(x, 1, 0, hidden_channels);
     size_t gate = gb->slice(x, 1, hidden_channels, hidden_channels);
     gate = gb->silu(gate);
@@ -133,7 +131,24 @@ size_t build_autoencoderdc_glumbconv(CactusGraph* gb, size_t input, const std::s
     size_t w_pt = gb->mmap_weights(model_folder + "/" + prefix + ".conv_point.weight.weights");
     x = gb->conv2d(x, w_pt, 0, 1, 1, 0, 0); // no bias
 
-    return gb->add(res, x);
+    // norm (RMSNorm) - applied post-convs in GLUMBConv
+    size_t w_norm = gb->mmap_weights(model_folder + "/" + prefix + ".norm.weight.weights");
+    size_t b_norm = gb->mmap_weights(model_folder + "/" + prefix + ".norm.bias.weights");
+    x = gb->transposeN(x, {0, 2, 3, 1}); // N, C, H, W -> N, H, W, C
+    auto shape = gb->get_output_buffer(x).shape;
+    size_t N = shape[0], H = shape[1], W = shape[2], C = shape[3];
+    x = gb->reshape(x, {N * H * W, C});
+    
+    // PyTorch AutoencoderDC GLUMBConv default eps=1e-5
+    x = gb->rms_norm(x, w_norm, 1e-5f);
+    x = gb->add(x, b_norm);
+    
+    x = gb->reshape(x, {N, H, W, C});
+    x = gb->transposeN(x, {0, 3, 1, 2}); // N, H, W, C -> N, C, H, W
+
+    size_t out = gb->add(res, x);
+    gb->register_debug_node(1, prefix + ".out", out);
+    return out;
 }
 
 size_t build_autoencoderdc_linear_attn(CactusGraph* gb, size_t input, const std::string& prefix, const std::string& model_folder, size_t /*dim*/, size_t heads) {
@@ -193,8 +208,9 @@ size_t build_autoencoderdc_linear_attn(CactusGraph* gb, size_t input, const std:
     float scale = 1.0f / std::sqrt(static_cast<float>(dim_head));
     size_t out = gb->linear_attention(qc, kc, vc, scale, ComputeBackend::CPU);
 
-    // out is [N, 2*heads, L, dim_head]
-    out = gb->transposeN(out, {0, 2, 1, 3});
+    // out is [N, 2*heads, L, dim_head] -> transpose to [N, 2*heads, dim_head, L]
+    // (HF: apply_linear_attention returns [B, 2*heads, dim_head, L], then reshape to [B, 2*inner_dim, H, W])
+    out = gb->transposeN(out, {0, 1, 3, 2}); // [N, 2*heads, dim_head, L]
     out = gb->reshape(out, {N, 2 * inner_dim, H, W});
 
     // out = attn.to_out(hidden_states.movedim(1, -1)).movedim(-1, 1)
@@ -212,12 +228,14 @@ size_t build_autoencoderdc_linear_attn(CactusGraph* gb, size_t input, const std:
     size_t b_norm_out = gb->mmap_weights(model_folder + "/" + prefix + ".norm_out.bias.weights");
     out = gb->transposeN(out, {0, 2, 3, 1}); // N, H, W, C
     out = gb->reshape(out, {N * H * W, C});
-    out = gb->rms_norm(out, w_norm_out, 1e-6f);
+    out = gb->rms_norm(out, w_norm_out, 1e-5f);
     out = gb->add(out, b_norm_out);
     out = gb->reshape(out, {N, H, W, C});
     out = gb->transposeN(out, {0, 3, 1, 2}); // N, C, H, W
 
-    return gb->add(res, out);
+    size_t out_add = gb->add(res, out);
+    gb->register_debug_node(2, prefix + ".out", out_add);
+    return out_add;
 }
 
 size_t build_efficientvit_block(CactusGraph* gb, size_t input, const std::string& prefix, const std::string& model_folder, size_t dim, size_t heads) {
@@ -229,6 +247,7 @@ size_t build_efficientvit_block(CactusGraph* gb, size_t input, const std::string
     // 2. GLUMBConv block (with residual internally)
     x = build_autoencoderdc_glumbconv(gb, x, prefix + ".conv_out", model_folder, dim);
 
+    gb->register_debug_node(3, prefix + ".out", x);
     return x;
 }
 
@@ -263,7 +282,14 @@ size_t build_autoencoder_dc_encode(CactusGraph* gb, size_t input, const std::str
         size_t num_layers = layers_per_block[i];
 
         for (size_t j = 0; j < num_layers; ++j) {
-            x = build_res_block(gb, x, block_prefix + "." + std::to_string(j), model_folder);
+            std::string layer_prefix = block_prefix + "." + std::to_string(j);
+            if (i >= 3) {
+                // Deeper encoder stages use EfficientViT blocks (same as decoder)
+                size_t heads = out_channel / 32;
+                x = build_efficientvit_block(gb, x, layer_prefix, model_folder, out_channel, heads);
+            } else {
+                x = build_res_block(gb, x, layer_prefix, model_folder);
+            }
         }
 
         if (i < num_blocks - 1 && num_layers > 0) {
@@ -274,7 +300,7 @@ size_t build_autoencoder_dc_encode(CactusGraph* gb, size_t input, const std::str
                 model_folder,
                 out_channel,
                 block_out_channels[i + 1],
-                true
+                false  // false = stride-2 strided conv (weights are [C_out, C_in, 3, 3])
             );
         }
     }
@@ -326,17 +352,9 @@ size_t build_autoencoder_dc_decode(CactusGraph* gb, size_t latent_input, const s
 
         // Upsampling block (layer 0)
         if (i < 5) {
-            if (i > 0) {
-                // For i=4,3,2,1: uses DCUpBlock2d at layer .0
-                size_t in_channel = block_out_channels[i + 1];
-                x = build_dc_up_block(gb, x, block_prefix + ".0", model_folder, in_channel, out_channel);
-            } else {
-                // For i=0: layer .0 is a simple conv
-                std::string prefix_0 = block_prefix + ".0";
-                size_t w = gb->mmap_weights(model_folder + "/" + prefix_0 + ".conv.weight.weights");
-                size_t b = gb->mmap_weights(model_folder + "/" + prefix_0 + ".conv.bias.weights");
-                x = gb->conv2d(x, w, b, 1, 1, 1, 1);
-            }
+            // All i < 5 blocks use DCUpBlock2d at layer .0
+            size_t in_channel = block_out_channels[i + 1];
+            x = build_dc_up_block(gb, x, block_prefix + ".0", model_folder, in_channel, out_channel);
         }
 
         // Processing layers
@@ -376,26 +394,41 @@ size_t build_autoencoder_dc_decode(CactusGraph* gb, size_t latent_input, const s
 
 std::vector<float> resize_rgb_bilinear(const uint8_t* src, int src_w, int src_h, int dst_w, int dst_h) {
     std::vector<float> out(static_cast<size_t>(dst_w) * dst_h * 3);
-    if (src_w == dst_w && src_h == dst_h) {
-        for (size_t i = 0; i < out.size(); ++i) {
-            out[i] = static_cast<float>(src[i]) / 255.0f;
-        }
-        return out;
-    }
+    
+    // PixArt style: resize and center crop
+    // Calculate the scale to fit the smaller dimension (so the larger dimension is cropped)
+    const float ratio = std::max(static_cast<float>(dst_w) / src_w, static_cast<float>(dst_h) / src_h);
+    
+    // Center of target in source coordinates
+    const float src_center_x = src_w / 2.0f;
+    const float src_center_y = src_h / 2.0f;
+    
+    // Half-size of target in source coordinates
+    const float src_half_w = (dst_w / ratio) / 2.0f;
+    const float src_half_h = (dst_h / ratio) / 2.0f;
+    
+    // Top-left of target in source coordinates
+    const float src_start_x = src_center_x - src_half_w;
+    const float src_start_y = src_center_y - src_half_h;
 
     for (int y = 0; y < dst_h; ++y) {
-        const float src_y = ((static_cast<float>(y) + 0.5f) * src_h / dst_h) - 0.5f;
+        // Map y to source coordinates
+        const float src_y = src_start_y + (static_cast<float>(y) + 0.5f) / ratio - 0.5f;
         int y0 = static_cast<int>(std::floor(src_y));
         int y1 = y0 + 1;
         const float wy = src_y - y0;
+        
+        // Clamp to edge
         y0 = std::max(0, std::min(y0, src_h - 1));
         y1 = std::max(0, std::min(y1, src_h - 1));
 
         for (int x = 0; x < dst_w; ++x) {
-            const float src_x = ((static_cast<float>(x) + 0.5f) * src_w / dst_w) - 0.5f;
+            // Map x to source coordinates
+            const float src_x = src_start_x + (static_cast<float>(x) + 0.5f) / ratio - 0.5f;
             int x0 = static_cast<int>(std::floor(src_x));
             int x1 = x0 + 1;
             const float wx = src_x - x0;
+            
             x0 = std::max(0, std::min(x0, src_w - 1));
             x1 = std::max(0, std::min(x1, src_w - 1));
 

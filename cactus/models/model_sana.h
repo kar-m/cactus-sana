@@ -26,12 +26,18 @@ protected:
 
 private:
     static constexpr size_t kMaxPromptTokens = 300;
+    static constexpr size_t kExtendedPromptTokens = 512; // chi_prefix(208) + 300 - 2 = 506, rounded up
     static constexpr size_t kTimestepDim = 256;
-    static constexpr float kFlowShift = 3.0f;
-    std::vector<__fp16> encode_prompt_to_fp16(const std::string& prompt) const;
+    static constexpr float kSigmaData = 0.5f;
+    static constexpr float kScalingFactor = 0.41407f;
+    static constexpr float kGuidanceScale = 4.5f;
+    static constexpr float kGuidanceEmbedScale = 0.1f;
+    std::vector<__fp16> encode_prompt_to_fp16(const std::string& prompt);
     std::vector<__fp16> make_noise_latents(size_t total_latents) const;
     std::vector<__fp16> make_image_conditioned_latents(const std::string& image_path, size_t width, size_t height) const;
-    size_t run_diffusion(const std::vector<__fp16>& prompt_embeds, std::vector<__fp16>& current_latents, size_t steps) const;
+    // t_start: first denoising step index (0 = full txt2img; >0 for img2img partial denoising)
+    size_t run_diffusion(const std::vector<__fp16>& prompt_embeds, std::vector<__fp16>& current_latents, size_t steps, size_t t_start = 0) const;
+    size_t run_diffusion_flow_euler(const std::vector<__fp16>& prompt_embeds, std::vector<__fp16>& current_latents, size_t steps, size_t t_start_idx = 0) const;
     size_t decode_latents(const std::vector<__fp16>& final_latents);
     void validate_dimensions(size_t width, size_t height) const;
 
@@ -40,11 +46,15 @@ private:
     std::unique_ptr<Model> text_encoder_;
 
     size_t prompt_embeds_node_ = 0;
-    size_t latents_node_ = 0;
+    size_t encoder_mask_node_ = 0;  // cross-attention mask [L * kMaxPromptTokens] fp16
+    size_t lat_in_node_ = 0;
     size_t timestep_node_ = 0;
-    size_t dt_node_ = 0;
-    size_t next_latents_node_ = 0;
+    size_t guidance_node_ = 0;
     size_t denoiser_output_node_ = 0;
+    std::vector<__fp16> encoder_mask_data_;  // precomputed mask, set from encode_prompt_to_fp16
+    bool has_guidance_embeds_ = true;        // true for Sprint (has guidance_mlp weights), false for Sana 1.0
+    std::vector<__fp16> null_prompt_embeds_;     // null/empty prompt embedding for CFG (Sana 1.0 only)
+    std::vector<__fp16> null_encoder_mask_data_; // null attention mask for CFG
 
     void* decoder_graph_handle_ = nullptr;
     size_t decoder_latents_node_ = 0;
@@ -55,10 +65,11 @@ private:
     bool has_vae_encoder_ = false;
 
     size_t text_encoder_dim_ = 2304;
+    size_t chi_token_count_ = 0;  // precomputed: encode(kChiPrompt).size() (no BOS) = tail_start for token selection
     size_t latent_channels_ = 32;
     size_t latents_h_ = 32;
     size_t latents_w_ = 32;
-    size_t diffusion_steps_ = 12;
+    size_t diffusion_steps_ = 2;
 };
 
 }

@@ -533,9 +533,15 @@ void compute_attention_node(GraphNode& node, const std::vector<std::unique_ptr<G
     size_t num_kv_heads = k_shape[2];
     size_t kv_seq_len = key_buffer.shape[1];
 
+    // Optional 4th input: attention mask [seq_len * kv_seq_len], 0 = ignore position, non-zero = keep
+    const __fp16* mask_ptr = nullptr;
+    if (node.input_ids.size() >= 4) {
+        const auto& mask_buf = nodes[node_index_map.at(node.input_ids[3])]->output_buffer;
+        mask_ptr = mask_buf.data_as<__fp16>();
+    }
     cactus_attention_f16(query_buffer.data_as<__fp16>(), key_buffer.data_as<__fp16>(),
                          value_buffer.data_as<__fp16>(), node.output_buffer.data_as<__fp16>(),
-                         batch_size, seq_len, kv_seq_len, num_q_heads, num_kv_heads, head_dim, node.params.scale, nullptr,
+                         batch_size, seq_len, kv_seq_len, num_q_heads, num_kv_heads, head_dim, node.params.scale, mask_ptr,
                          node.params.position_offset, node.params.window_size, node.params.is_causal);
 }
 
@@ -566,51 +572,55 @@ void compute_linear_attention_node(GraphNode& node, const std::vector<std::uniqu
     
     float scale = node.params.scale;
 
-    // EfficientViT linear attention:
-    // Q_new = Q * (K^T * V)
-    // Both Q and K are ReLU activated before multiplication.
-    // To do this efficiently without external libraries, we compute per-batch per-head.
-    
+    // EfficientViT linear attention (matches HF SanaMultiscaleAttnProcessor2_0.apply_linear_attention):
+    // Equivalent formula: out = Q @ (K^T V) / (Q @ k_sum + eps)
+    // where k_sum[d] = sum_l relu(K[l, d])
+    // Q and K have ReLU applied here (matching HF's nonlinearity applied before attention).
+
     for (size_t b = 0; b < batch_size; ++b) {
         for (size_t h = 0; h < num_heads; ++h) {
             size_t head_offset = (b * num_heads + h) * seq_len * head_dim;
-            
-            // 1. Compute K^T * V (dim x dim matrix)
+
+            // 1. Compute K^T * V (dim x dim matrix) and k_sum (using float for speed)
             std::vector<float> kv_matrix(head_dim * head_dim, 0.0f);
-            std::vector<float> q_sum(head_dim, 0.0f); // Not explicitly requested by original SANA but needed for normalizer if we wanted formal attention. Sana uses division by grouped sum.
-            
+            std::vector<float> k_sum(head_dim, 0.0f);
+
             for (size_t l = 0; l < seq_len; ++l) {
                 size_t token_offset = head_offset + l * head_dim;
                 for (size_t d1 = 0; d1 < head_dim; ++d1) {
                     float k_val = static_cast<float>(k_ptr[token_offset + d1]);
-                    k_val = std::max(0.0f, k_val); // ReLU
-                    
+                    if (k_val < 0.0f) k_val = 0.0f; // ReLU
+                    k_sum[d1] += k_val;
+
+                    float* kv_row = &kv_matrix[d1 * head_dim];
                     for (size_t d2 = 0; d2 < head_dim; ++d2) {
-                        float v_val = static_cast<float>(v_ptr[token_offset + d2]);
-                        kv_matrix[d1 * head_dim + d2] += k_val * v_val;
+                        kv_row[d2] += k_val * static_cast<float>(v_ptr[token_offset + d2]);
                     }
                 }
             }
-            
-            // 2. Compute Q * (K^T * V)
+
+            // 2. Compute Q * (K^T * V) normalized
+            std::vector<float> q_vals(head_dim);
             for (size_t l = 0; l < seq_len; ++l) {
                 size_t token_offset = head_offset + l * head_dim;
-                
-                // Normalizer (sum over key sequence)
-                float k_sum = 0.0f;
-                // Wait, Sana's EfficientViT implementation uses a grouped normalization.
-                // Let's implement the un-normalized version scaled by math first.
-                // Actual formula: Q @ (K.T @ V) * scale
-                
+
+                float denom_val = 1e-15f;
+                for (size_t d1 = 0; d1 < head_dim; ++d1) {
+                    float q_val = static_cast<float>(q_ptr[token_offset + d1]);
+                    if (q_val < 0.0f) q_val = 0.0f; // ReLU
+                    q_vals[d1] = q_val;
+                    denom_val += q_val * k_sum[d1];
+                }
+
+                float inv_denom = 1.0f / denom_val;
                 for (size_t d2 = 0; d2 < head_dim; ++d2) {
                     float out_val = 0.0f;
                     for (size_t d1 = 0; d1 < head_dim; ++d1) {
-                        float q_val = static_cast<float>(q_ptr[token_offset + d1]);
-                        q_val = std::max(0.0f, q_val); // ReLU
-                        
-                        out_val += q_val * kv_matrix[d1 * head_dim + d2];
+                        out_val += q_vals[d1] * kv_matrix[d1 * head_dim + d2];
                     }
-                    out_ptr[token_offset + d2] = static_cast<__fp16>(out_val * scale);
+                    float final_val = out_val * inv_denom;
+                    final_val = std::max(-65504.0f, std::min(65504.0f, final_val));
+                    out_ptr[token_offset + d2] = static_cast<__fp16>(final_val);
                 }
             }
         }

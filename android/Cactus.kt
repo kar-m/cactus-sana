@@ -138,6 +138,42 @@ class Cactus private constructor(private var handle: Long) : Closeable {
         return responseJson
     }
 
+    fun generateImage(
+        prompt: String,
+        width: Int = 1024,
+        height: Int = 1024
+    ): ImageResult {
+        checkHandle()
+        val responseJson = nativeGenerateImage(handle, prompt, width, height)
+        val json = JSONObject(responseJson)
+        if (json.has("error") && !json.isNull("error")) {
+            throw CactusException(json.getString("error"))
+        }
+        val totalTime = json.optDouble("total_time_ms", 0.0)
+        val pixels = nativeGetLastImagePixels(handle)
+            ?: throw CactusException(nativeGetLastError().ifEmpty { "Failed to retrieve image pixels" })
+        return ImageResult(width, height, pixels, totalTime)
+    }
+
+    fun generateImageToImage(
+        prompt: String,
+        initImagePath: String,
+        width: Int = 1024,
+        height: Int = 1024,
+        strength: Float = 0.6f
+    ): ImageResult {
+        checkHandle()
+        val responseJson = nativeGenerateImageToImage(handle, prompt, initImagePath, width, height, strength)
+        val json = JSONObject(responseJson)
+        if (json.has("error") && !json.isNull("error")) {
+            throw CactusException(json.getString("error"))
+        }
+        val totalTime = json.optDouble("total_time_ms", 0.0)
+        val pixels = nativeGetLastImagePixels(handle)
+            ?: throw CactusException(nativeGetLastError().ifEmpty { "Failed to retrieve image pixels" })
+        return ImageResult(width, height, pixels, totalTime)
+    }
+
     fun imageEmbed(imagePath: String): FloatArray {
         checkHandle()
         return nativeImageEmbed(handle, imagePath)
@@ -207,6 +243,9 @@ class Cactus private constructor(private var handle: Long) : Closeable {
     private external fun nativeRagQuery(handle: Long, query: String, topK: Int): String
     private external fun nativeTokenize(handle: Long, text: String): IntArray?
     private external fun nativeScoreWindow(handle: Long, tokens: IntArray, start: Int, end: Int, context: Int): String
+    private external fun nativeGenerateImage(handle: Long, prompt: String, width: Int, height: Int): String
+    private external fun nativeGenerateImageToImage(handle: Long, prompt: String, initImagePath: String, width: Int, height: Int, strength: Float): String
+    private external fun nativeGetLastImagePixels(handle: Long): ByteArray?
     private external fun nativeImageEmbed(handle: Long, imagePath: String): FloatArray?
     private external fun nativeAudioEmbed(handle: Long, audioPath: String): FloatArray?
     private external fun nativeVad(handle: Long, audioPath: String?, optionsJson: String?, pcmData: ByteArray?): String
@@ -443,6 +482,27 @@ fun interface TokenCallback {
 }
 
 class CactusException(message: String) : Exception(message)
+
+data class ImageResult(
+    val width: Int,
+    val height: Int,
+    /** Packed RGB uint8 pixels, row-major [H * W * 3]. */
+    val pixels: ByteArray,
+    val totalTime: Double
+) {
+    /** Convert to an Android Bitmap (ARGB_8888). */
+    fun toBitmap(): android.graphics.Bitmap {
+        val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+        val colors = IntArray(width * height) { i ->
+            val r = pixels[i * 3].toInt() and 0xFF
+            val g = pixels[i * 3 + 1].toInt() and 0xFF
+            val b = pixels[i * 3 + 2].toInt() and 0xFF
+            (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+        bitmap.setPixels(colors, 0, width, 0, 0, width, height)
+        return bitmap
+    }
+}
 
 private fun JSONObject.toCompletionResult(): CompletionResult {
     val functionCalls = optJSONArray("function_calls")?.let { arr ->

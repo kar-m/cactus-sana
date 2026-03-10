@@ -6,6 +6,51 @@
 #include <sstream>
 #include <iomanip>
 
+namespace {
+
+// Portable IEEE 754 half-precision to single-precision conversion
+static float fp16_to_float(uint16_t h) {
+    uint32_t sign = (h >> 15) & 1u;
+    uint32_t exp  = (h >> 10) & 0x1fu;
+    uint32_t frac = h & 0x3ffu;
+    uint32_t f32;
+    if (exp == 0u) {
+        f32 = sign << 31;  // zero (treat subnormals as zero for images)
+    } else if (exp == 31u) {
+        f32 = (sign << 31) | (0xffu << 23) | (frac << 13);  // inf / nan
+    } else {
+        f32 = (sign << 31) | ((exp + 112u) << 23) | (frac << 13);
+    }
+    float result;
+    std::memcpy(&result, &f32, sizeof(float));
+    return result;
+}
+
+// Convert NCHW fp16 VAE output [-1,1] to packed RGB uint8 HWC and store in handle.
+static void store_image_pixels(CactusModelHandle* handle, void* raw_ptr,
+                               size_t width, size_t height) {
+    const size_t hw = width * height;
+    handle->last_image_pixels.resize(3 * hw);
+    handle->last_image_width  = width;
+    handle->last_image_height = height;
+
+    const uint16_t* fp16 = static_cast<const uint16_t*>(raw_ptr);
+    for (size_t y = 0; y < height; ++y) {
+        for (size_t x = 0; x < width; ++x) {
+            for (size_t c = 0; c < 3; ++c) {
+                float f = fp16_to_float(fp16[c * hw + y * width + x]);
+                f = (f + 1.0f) * 0.5f;
+                if (f < 0.0f) f = 0.0f;
+                if (f > 1.0f) f = 1.0f;
+                handle->last_image_pixels[(y * width + x) * 3 + c] =
+                    static_cast<uint8_t>(f * 255.0f + 0.5f);
+            }
+        }
+    }
+}
+
+} // namespace
+
 using namespace cactus::engine;
 using namespace cactus::ffi;
 
@@ -50,6 +95,12 @@ int cactus_generate_image(
 
         CACTUS_LOG_INFO("generate_image", "Image generation completed in "
                         << std::fixed << std::setprecision(2) << total_time_ms << "ms");
+
+        // Extract and store pixels for cactus_get_last_image_pixels_rgb
+        void* raw_ptr = cactus_get_output(model, output_node);
+        if (raw_ptr) {
+            store_image_pixels(handle, raw_ptr, width, height);
+        }
 
         std::ostringstream json;
         json << "{";
@@ -131,6 +182,12 @@ int cactus_generate_image_to_image(
         double total_time_ms = std::chrono::duration_cast<std::chrono::microseconds>(
             end_time - start_time).count() / 1000.0;
 
+        // Extract and store pixels for cactus_get_last_image_pixels_rgb
+        void* raw_ptr = cactus_get_output(model, output_node);
+        if (raw_ptr) {
+            store_image_pixels(handle, raw_ptr, width, height);
+        }
+
         std::ostringstream json;
         json << "{";
         json << "\"success\":true,";
@@ -161,6 +218,29 @@ int cactus_generate_image_to_image(
         handle_error_response("Unknown error during image generation", response_buffer, buffer_size);
         return -1;
     }
+}
+
+int cactus_get_last_image_pixels_rgb(
+    cactus_model_t model,
+    uint8_t* out_buffer,
+    size_t buffer_size,
+    size_t* out_width,
+    size_t* out_height
+) {
+    if (!model || !out_width || !out_height) return -1;
+    auto* handle = static_cast<CactusModelHandle*>(model);
+    if (handle->last_image_pixels.empty()) return -1;
+
+    *out_width  = handle->last_image_width;
+    *out_height = handle->last_image_height;
+    const size_t needed = handle->last_image_pixels.size();
+
+    // Allow null buffer to query required size
+    if (!out_buffer) return static_cast<int>(needed);
+    if (buffer_size < needed) return -1;
+
+    std::memcpy(out_buffer, handle->last_image_pixels.data(), needed);
+    return static_cast<int>(needed);
 }
 
 void* cactus_get_output(

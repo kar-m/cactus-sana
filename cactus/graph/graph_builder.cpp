@@ -417,6 +417,11 @@ size_t CactusGraph::attention(size_t query, size_t key, size_t value, float scal
     return add_node(OpType::ATTENTION, {query, key, value}, {}, params);
 }
 
+size_t CactusGraph::attention_with_mask(size_t query, size_t key, size_t value, float scale, size_t mask_node, ComputeBackend backend) {
+    OpParams params{.scale = scale, .is_causal = false, .backend = backend};
+    return add_node(OpType::ATTENTION, {query, key, value, mask_node}, {}, params);
+}
+
 size_t CactusGraph::attention_int8_hybrid(size_t query, size_t key_new, size_t value_new, float scale, size_t position_offset,
                                           const int8_t* cached_keys, const int8_t* cached_values,
                                           const float* k_scales, const float* v_scales,

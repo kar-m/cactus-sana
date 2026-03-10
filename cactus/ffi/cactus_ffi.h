@@ -150,6 +150,17 @@ CACTUS_FFI_EXPORT int cactus_generate_image_to_image(
     size_t buffer_size
 );
 
+// Retrieve RGB uint8 pixels from the last cactus_generate_image / cactus_generate_image_to_image call.
+// out_buffer must be at least 3 * (*out_width) * (*out_height) bytes.
+// Returns number of bytes written, or -1 on error.
+CACTUS_FFI_EXPORT int cactus_get_last_image_pixels_rgb(
+    cactus_model_t model,
+    uint8_t* out_buffer,
+    size_t buffer_size,
+    size_t* out_width,
+    size_t* out_height
+);
+
 CACTUS_FFI_EXPORT int cactus_rag_query(
     cactus_model_t model,
     const char* query,

@@ -1,4 +1,11 @@
 import Foundation
+import CoreGraphics
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+private typealias UIImage = NSImage
+#endif
 import cactus
 
 public final class Cactus: @unchecked Sendable {
@@ -212,12 +219,41 @@ public final class Cactus: @unchecked Sendable {
         }
     }
 
+    public struct ImageResult {
+        public let width: Int
+        public let height: Int
+        /// Packed RGB uint8 pixels, row-major [H * W * 3].
+        public let pixels: Data
+        public let totalTime: Double
+
+        /// Convert to a UIImage (iOS/macOS).
+        public func toImage() -> UIImage? {
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            var pixelsCopy = pixels
+            return pixelsCopy.withUnsafeMutableBytes { ptr -> UIImage? in
+                guard let base = ptr.baseAddress else { return nil }
+                guard let ctx = CGContext(
+                    data: base,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: width * 3,
+                    space: colorSpace,
+                    bitmapInfo: CGImageAlphaInfo.none.rawValue
+                ) else { return nil }
+                guard let cgImage = ctx.makeImage() else { return nil }
+                return UIImage(cgImage: cgImage)
+            }
+        }
+    }
+
     public enum CactusError: Error, LocalizedError {
         case initializationFailed(String)
         case completionFailed(String)
         case transcriptionFailed(String)
         case vadFailed(String)
         case embeddingFailed(String)
+        case imageFailed(String)
         case invalidResponse
 
         public var errorDescription: String? {
@@ -227,6 +263,7 @@ public final class Cactus: @unchecked Sendable {
             case .transcriptionFailed(let msg): return "Transcription failed: \(msg)"
             case .vadFailed(let msg): return "VAD failed: \(msg)"
             case .embeddingFailed(let msg): return "Embedding failed: \(msg)"
+            case .imageFailed(let msg): return "Image generation failed: \(msg)"
             case .invalidResponse: return "Invalid response from model"
             }
         }
@@ -600,6 +637,81 @@ public final class Cactus: @unchecked Sendable {
         return StreamTranscriber(handle: streamHandle)
     }
 
+    public func generateImage(
+        prompt: String,
+        width: Int = 1024,
+        height: Int = 1024
+    ) throws -> ImageResult {
+        var buffer = [CChar](repeating: 0, count: Self.defaultBufferSize)
+
+        let result = buffer.withUnsafeMutableBufferPointer { bufferPtr in
+            cactus_generate_image(handle, prompt, width, height, bufferPtr.baseAddress, bufferPtr.count)
+        }
+
+        if result < 0 {
+            let error = String(cString: cactus_get_last_error())
+            throw CactusError.imageFailed(error.isEmpty ? "Unknown error" : error)
+        }
+
+        let responseString = String(cString: buffer)
+        guard let json = parseJSON(responseString) else { throw CactusError.invalidResponse }
+        if let errorMsg = json["error"] as? String { throw CactusError.imageFailed(errorMsg) }
+        let totalTime = json["total_time_ms"] as? Double ?? 0
+
+        return try extractLastImagePixels(width: width, height: height, totalTime: totalTime)
+    }
+
+    public func generateImageToImage(
+        prompt: String,
+        initImagePath: String,
+        width: Int = 1024,
+        height: Int = 1024,
+        strength: Float = 0.6
+    ) throws -> ImageResult {
+        var buffer = [CChar](repeating: 0, count: Self.defaultBufferSize)
+
+        let result = buffer.withUnsafeMutableBufferPointer { bufferPtr in
+            cactus_generate_image_to_image(
+                handle, prompt, initImagePath, width, height, strength,
+                bufferPtr.baseAddress, bufferPtr.count)
+        }
+
+        if result < 0 {
+            let error = String(cString: cactus_get_last_error())
+            throw CactusError.imageFailed(error.isEmpty ? "Unknown error" : error)
+        }
+
+        let responseString = String(cString: buffer)
+        guard let json = parseJSON(responseString) else { throw CactusError.invalidResponse }
+        if let errorMsg = json["error"] as? String { throw CactusError.imageFailed(errorMsg) }
+        let totalTime = json["total_time_ms"] as? Double ?? 0
+
+        return try extractLastImagePixels(width: width, height: height, totalTime: totalTime)
+    }
+
+    private func extractLastImagePixels(width: Int, height: Int, totalTime: Double) throws -> ImageResult {
+        var outWidth: Int = 0
+        var outHeight: Int = 0
+
+        // Query required buffer size
+        let needed = cactus_get_last_image_pixels_rgb(handle, nil, 0, &outWidth, &outHeight)
+        if needed < 0 { throw CactusError.imageFailed("No image pixels available") }
+
+        var pixels = Data(count: Int(needed))
+        let copied = pixels.withUnsafeMutableBytes { ptr in
+            cactus_get_last_image_pixels_rgb(
+                handle,
+                ptr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                Int(needed),
+                &outWidth,
+                &outHeight
+            )
+        }
+        if copied < 0 { throw CactusError.imageFailed("Failed to copy image pixels") }
+
+        return ImageResult(width: width, height: height, pixels: pixels, totalTime: totalTime)
+    }
+
     public func reset() {
         cactus_reset(handle)
     }
@@ -701,6 +813,44 @@ public extension Cactus {
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     let result = try self.transcribe(audioPath: audioPath, prompt: prompt, options: options)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func generateImage(
+        prompt: String,
+        width: Int = 1024,
+        height: Int = 1024
+    ) async throws -> ImageResult {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let result = try self.generateImage(prompt: prompt, width: width, height: height)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func generateImageToImage(
+        prompt: String,
+        initImagePath: String,
+        width: Int = 1024,
+        height: Int = 1024,
+        strength: Float = 0.6
+    ) async throws -> ImageResult {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let result = try self.generateImageToImage(
+                        prompt: prompt, initImagePath: initImagePath,
+                        width: width, height: height, strength: strength)
                     continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)

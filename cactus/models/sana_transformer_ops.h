@@ -21,7 +21,8 @@ size_t build_sana_transformer_block(
     size_t num_heads,
     size_t dim_head,
     size_t num_cross_heads,
-    size_t cross_dim_head
+    size_t cross_dim_head,
+    size_t encoder_mask_node = 0  // optional: [L * S] attention mask for cross-attention
 );
 
 } // namespace engine

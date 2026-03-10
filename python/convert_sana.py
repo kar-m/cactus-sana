@@ -17,6 +17,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Add parent to path so we can import cactus modules
 sys.path.insert(0, str(Path(__file__).parent))
@@ -49,6 +50,33 @@ def write_config(path, config_dict):
                 f.write(f"{k}={','.join(str(x) for x in v)}\n")
             else:
                 f.write(f"{k}={v}\n")
+
+
+def load_diffusers_component(model_cls, model_id, subfolder, variant: Optional[str] = None):
+    """Load a diffusers component with optional variant and simple fallback variants."""
+    attempts = []
+    if variant is not None:
+        attempts.append(variant)
+    attempts.extend([None, "fp16", "bf16"])
+    # Deduplicate while preserving order.
+    seen = set()
+    attempts = [a for a in attempts if not (a in seen or seen.add(a))]
+    last_error = None
+    for candidate in attempts:
+        kwargs = dict(subfolder=subfolder, torch_dtype=torch.float32)
+        if candidate is not None:
+            kwargs["variant"] = candidate
+        try:
+            model = model_cls.from_pretrained(model_id, **kwargs)
+            return model, candidate
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    raise RuntimeError(
+        f"Failed to load {model_cls.__name__} from {model_id}/{subfolder} "
+        f"with variants {attempts}: {last_error}"
+    )
 
 
 # ──────────────────────────────────────────────
@@ -92,7 +120,12 @@ def convert_text_encoder(output_dir, precision="INT8", model_id="google/gemma-2-
 # ──────────────────────────────────────────────
 # 2. Transformer Denoiser (SanaTransformer2DModel)
 # ──────────────────────────────────────────────
-def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-Model/Sana_600M_1024px_diffusers"):
+def convert_transformer(
+    output_dir,
+    precision="FP16",
+    model_id="Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers",
+    variant: Optional[str] = None,
+):
     """Convert the SanaTransformer2DModel weights.
 
     Returns a dict with transformer config values needed by Cactus.
@@ -102,9 +135,13 @@ def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-
     print(f"{'='*60}")
 
     from diffusers import SanaTransformer2DModel
-    transformer = SanaTransformer2DModel.from_pretrained(
-        model_id, subfolder="transformer", torch_dtype=torch.float32
+    transformer, used_variant = load_diffusers_component(
+        SanaTransformer2DModel,
+        model_id=model_id,
+        subfolder="transformer",
+        variant=variant,
     )
+    print(f"  Loaded transformer with variant={used_variant if used_variant else 'default'}")
     sd = transformer.state_dict()
 
     out = Path(output_dir)
@@ -115,11 +152,21 @@ def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-
     #     time_embed.emb.timestep_embedder.linear_2.{weight,bias}
     # Cactus: t_embedder.mlp.{0,2}.{weight,bias}
     global_map = {
-        # Timestep embedder
+        # Timestep embedder (Sprint/guidance_embeds model: no .emb. in path)
+        "time_embed.timestep_embedder.linear_1.weight": "t_embedder.mlp.0.weight",
+        "time_embed.timestep_embedder.linear_1.bias":   "t_embedder.mlp.0.bias",
+        "time_embed.timestep_embedder.linear_2.weight": "t_embedder.mlp.2.weight",
+        "time_embed.timestep_embedder.linear_2.bias":   "t_embedder.mlp.2.bias",
+        # Sana 1.0 (non-Sprint): time_embed.emb.timestep_embedder.*
         "time_embed.emb.timestep_embedder.linear_1.weight": "t_embedder.mlp.0.weight",
         "time_embed.emb.timestep_embedder.linear_1.bias":   "t_embedder.mlp.0.bias",
         "time_embed.emb.timestep_embedder.linear_2.weight": "t_embedder.mlp.2.weight",
         "time_embed.emb.timestep_embedder.linear_2.bias":   "t_embedder.mlp.2.bias",
+        # Guidance embedder (present when guidance_embeds=True, i.e. Sana Sprint)
+        "time_embed.guidance_embedder.linear_1.weight": "t_embedder.guidance_mlp.0.weight",
+        "time_embed.guidance_embedder.linear_1.bias":   "t_embedder.guidance_mlp.0.bias",
+        "time_embed.guidance_embedder.linear_2.weight": "t_embedder.guidance_mlp.2.weight",
+        "time_embed.guidance_embedder.linear_2.bias":   "t_embedder.guidance_mlp.2.bias",
         # Additional timestep components
         "time_embed.linear.weight": "t_embedder.linear.weight",
         "time_embed.linear.bias":   "t_embedder.linear.bias",
@@ -158,6 +205,7 @@ def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-
     num_blocks = max(block_indices) + 1 if block_indices else 0
     print(f"  Found {num_blocks} transformer blocks")
 
+    qk_norm_exported = 0
     for i in range(num_blocks):
         hf_prefix = f"transformer_blocks.{i}"
         cactus_prefix = f"blocks.{i}"
@@ -175,6 +223,8 @@ def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-
             "attn1.to_q.weight": "attn1.to_q.weight",
             "attn1.to_k.weight": "attn1.to_k.weight",
             "attn1.to_v.weight": "attn1.to_v.weight",
+            "attn1.norm_q.weight": "attn1.norm_q.weight",
+            "attn1.norm_k.weight": "attn1.norm_k.weight",
             "attn1.to_out.0.weight": "attn1.to_out.0.weight",
             "attn1.to_out.0.bias": "attn1.to_out.0.bias",
             # attn2 (cross-attention)
@@ -184,6 +234,8 @@ def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-
             "attn2.to_k.bias": "attn2.to_k.bias",
             "attn2.to_v.weight": "attn2.to_v.weight",
             "attn2.to_v.bias": "attn2.to_v.bias",
+            "attn2.norm_q.weight": "attn2.norm_q.weight",
+            "attn2.norm_k.weight": "attn2.norm_k.weight",
             "attn2.to_out.0.weight": "attn2.to_out.0.weight",
             "attn2.to_out.0.bias": "attn2.to_out.0.bias",
             # ff (GLUMBConv)
@@ -196,7 +248,17 @@ def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-
         for hf_suffix, cactus_suffix in block_map.items():
             hf_key = f"{hf_prefix}.{hf_suffix}"
             if hf_key in sd:
-                save(sd[hf_key], out / f"{cactus_prefix}.{cactus_suffix}.weights", precision)
+                # scale_shift_table is used in add() (not matmul), so must stay FP16
+                # to avoid INT8 N-padding causing shape mismatch [6,dim] -> [8,dim]
+                w_precision = "FP16" if hf_suffix == "scale_shift_table" else precision
+                save(sd[hf_key], out / f"{cactus_prefix}.{cactus_suffix}.weights", w_precision)
+                if hf_suffix in {
+                    "attn1.norm_q.weight",
+                    "attn1.norm_k.weight",
+                    "attn2.norm_q.weight",
+                    "attn2.norm_k.weight",
+                }:
+                    qk_norm_exported += 1
 
 
         if (i + 1) % 7 == 0 or i == num_blocks - 1:
@@ -210,7 +272,9 @@ def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-
     }
     for hf_key, cactus_key in final_map.items():
         if hf_key in sd:
-            save(sd[hf_key], out / f"{cactus_key}.weights", precision)
+            # scale_shift_table is used in add() (not matmul), must stay FP16
+            w_precision = "FP16" if "scale_shift_table" in hf_key else precision
+            save(sd[hf_key], out / f"{cactus_key}.weights", w_precision)
             print(f"  {hf_key} -> {cactus_key}")
 
     # Report unsaved weights
@@ -231,6 +295,12 @@ def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-
 
     print(f"Transformer saved to {out}")
     transformer_config = transformer.config
+    if getattr(transformer_config, "qk_norm", None) is not None and qk_norm_exported == 0:
+        raise RuntimeError(
+            "Transformer config enables qk_norm but no norm_q/norm_k weights were exported. "
+            "Verify model-id/variant points to the intended Sana-Sprint checkpoint."
+        )
+    print(f"  qk_norm={getattr(transformer_config, 'qk_norm', None)} qk_norm_weights_exported={qk_norm_exported}")
     exported_config = {
         "hidden_dim": int(transformer_config.num_attention_heads * transformer_config.attention_head_dim),
         "num_layers": int(transformer_config.num_layers),
@@ -242,6 +312,8 @@ def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-
         "caption_channels": int(transformer_config.caption_channels),
         "in_channels": int(transformer_config.in_channels),
         "patch_size": int(transformer_config.patch_size),
+        "use_qk_norm": bool(getattr(transformer_config, "qk_norm", None)),
+        "has_guidance_embeds": bool(getattr(transformer_config, "guidance_embeds", False)),
     }
     del transformer, sd
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
@@ -251,16 +323,25 @@ def convert_transformer(output_dir, precision="FP16", model_id="Efficient-Large-
 # ──────────────────────────────────────────────
 # 3. VAE (AutoencoderDC)
 # ──────────────────────────────────────────────
-def convert_vae(output_dir, precision="FP16", model_id="Efficient-Large-Model/Sana_600M_1024px_diffusers"):
+def convert_vae(
+    output_dir,
+    precision="FP16",
+    model_id="Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers",
+    variant: Optional[str] = None,
+):
     """Convert AutoencoderDC weights."""
     print(f"\n{'='*60}")
     print(f"Converting VAE (AutoencoderDC)")
     print(f"{'='*60}")
 
     from diffusers import AutoencoderDC
-    vae = AutoencoderDC.from_pretrained(
-        model_id, subfolder="vae", torch_dtype=torch.float32
+    vae, used_variant = load_diffusers_component(
+        AutoencoderDC,
+        model_id=model_id,
+        subfolder="vae",
+        variant=variant,
     )
+    print(f"  Loaded VAE with variant={used_variant if used_variant else 'default'}")
     sd = vae.state_dict()
 
     vae_dir = Path(output_dir) / "vae"
@@ -371,10 +452,16 @@ def map_vae_encoder_key(hf_key):
 def main():
     parser = argparse.ArgumentParser(description="Convert Sana-Sprint weights to Cactus format")
     parser.add_argument("--output", "-o", required=True, help="Output directory")
-    parser.add_argument("--precision", default="FP16", choices=["FP16", "INT8"],
+    parser.add_argument("--precision", default="FP16", choices=["FP16", "INT8", "INT4"],
                         help="Weight precision (default: FP16)")
-    parser.add_argument("--model-id", default="Efficient-Large-Model/Sana_600M_1024px_diffusers",
+    parser.add_argument("--model-id", default="Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers",
                         help="HuggingFace model ID for transformer + VAE")
+    parser.add_argument(
+        "--variant",
+        default=None,
+        choices=["fp16", "bf16"],
+        help="Optional diffusers variant (e.g. fp16) for repos that do not expose default model files",
+    )
     parser.add_argument("--text-encoder-id", default="google/gemma-2-2b-it",
                         help="HuggingFace model ID for text encoder")
     parser.add_argument("--skip-text-encoder", action="store_true",
@@ -394,10 +481,10 @@ def main():
 
     transformer_cfg = None
     if not args.skip_transformer:
-        transformer_cfg = convert_transformer(output_dir, args.precision, args.model_id)
+        transformer_cfg = convert_transformer(output_dir, args.precision, args.model_id, args.variant)
 
     if not args.skip_vae:
-        convert_vae(output_dir, args.precision, args.model_id)
+        convert_vae(output_dir, args.precision, args.model_id, args.variant)
 
     # Write top-level config
     if transformer_cfg is None:
@@ -413,6 +500,8 @@ def main():
             "caption_channels": 2304,
             "in_channels": 32,
             "patch_size": 1,
+            "use_qk_norm": False,
+            "has_guidance_embeds": True,
         }
 
     config = {
@@ -427,6 +516,8 @@ def main():
         "caption_channels": transformer_cfg["caption_channels"],
         "in_channels": transformer_cfg["in_channels"],
         "patch_size": transformer_cfg["patch_size"],
+        "use_qk_norm": transformer_cfg.get("use_qk_norm", False),
+        "has_guidance_embeds": transformer_cfg.get("has_guidance_embeds", True),
     }
     write_config(output_dir / "config.txt", config)
     print(f"\nConfig written to {output_dir / 'config.txt'}")

@@ -521,6 +521,8 @@ public:
     size_t attention(size_t query, size_t key, size_t value, float scale, bool is_causal = true, ComputeBackend backend = ComputeBackend::CPU);
     size_t attention(size_t query, size_t key, size_t value, float scale, size_t position_offset, ComputeBackend backend = ComputeBackend::CPU);
     size_t attention(size_t query, size_t key, size_t value, float scale, size_t position_offset, size_t window_size, ComputeBackend backend = ComputeBackend::CPU);
+    // Cross-attention with additive encoder mask (0=ignore, non-zero=keep):
+    size_t attention_with_mask(size_t query, size_t key, size_t value, float scale, size_t mask_node, ComputeBackend backend = ComputeBackend::CPU);
     
     size_t linear_attention(size_t query, size_t key, size_t value, float scale, ComputeBackend backend = ComputeBackend::CPU);
 

@@ -453,6 +453,134 @@ void cactus_conv1d_f16(
     conv1d_f16_neon(input, weight, bias, output, N, L, C_in, C_out, K, stride);
 }
 
+#ifdef __APPLE__
+// 1×1 conv (groups=1) via direct SGEMM on NCHW layout.
+// weight[C_out, C_in] × input_n[C_in, L] = output_n[C_out, L]
+// Uses NoTrans × NoTrans so no physical transpose of either operand.
+static void conv2d_1x1_sgemm_f16(
+    const __fp16* input,
+    const __fp16* weight,
+    const __fp16* bias,
+    __fp16* output,
+    size_t N, size_t H, size_t W,
+    size_t C_in, size_t C_out
+) {
+    const size_t L = H * W;
+
+    std::vector<float> W_f32(C_out * C_in);
+    for (size_t i = 0; i < C_out * C_in; ++i) W_f32[i] = (float)weight[i];
+
+    std::vector<float> In_f32(C_in * L);
+    std::vector<float> Out_f32(C_out * L);
+
+    for (size_t n = 0; n < N; ++n) {
+        const __fp16* in_n  = input  + n * C_in  * L;
+        __fp16*       out_n = output + n * C_out * L;
+
+        for (size_t i = 0; i < C_in * L; ++i) In_f32[i] = (float)in_n[i];
+
+        // C[C_out, L] = A[C_out, C_in] × B[C_in, L]
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    (int)C_out, (int)L, (int)C_in,
+                    1.0f, W_f32.data(), (int)C_in,
+                    In_f32.data(), (int)L,
+                    0.0f, Out_f32.data(), (int)L);
+
+        if (bias) {
+            for (size_t oc = 0; oc < C_out; ++oc) {
+                float b = (float)bias[oc];
+                for (size_t l = 0; l < L; ++l)
+                    out_n[oc * L + l] = (__fp16)(Out_f32[oc * L + l] + b);
+            }
+        } else {
+            for (size_t i = 0; i < C_out * L; ++i) out_n[i] = (__fp16)Out_f32[i];
+        }
+    }
+}
+
+// General conv (groups=1) via im2col + SGEMM.
+// Tiles the spatial dimension so the im2col buffer stays ≤ ~32 MB.
+static void conv2d_im2col_sgemm_f16(
+    const __fp16* input,
+    const __fp16* weight,
+    const __fp16* bias,
+    __fp16* output,
+    size_t N, size_t H, size_t W,
+    size_t C_in, size_t C_out,
+    size_t KH, size_t KW,
+    size_t stride_h, size_t stride_w,
+    size_t padding_h, size_t padding_w,
+    size_t dilation_h, size_t dilation_w,
+    size_t H_out, size_t W_out
+) {
+    const size_t L     = H_out * W_out;
+    const size_t K_col = C_in * KH * KW;
+
+    // Convert weight to f32 once: shape [C_out, K_col]
+    std::vector<float> W_f32(C_out * K_col);
+    for (size_t i = 0; i < C_out * K_col; ++i) W_f32[i] = (float)weight[i];
+
+    // Cap im2col buffer at ~32 MB
+    constexpr size_t MAX_COL_BYTES = 32UL * 1024 * 1024;
+    const size_t TILE_L = std::max(size_t(1), MAX_COL_BYTES / (K_col * sizeof(float)));
+
+    std::vector<float> col_buf(std::min(TILE_L, L) * K_col);
+    std::vector<float> out_tile(C_out * std::min(TILE_L, L));
+
+    for (size_t n = 0; n < N; ++n) {
+        const __fp16* in_n  = input  + n * C_in  * H * W;
+        __fp16*       out_n = output + n * C_out * L;
+
+        for (size_t l_start = 0; l_start < L; l_start += TILE_L) {
+            const size_t l_end  = std::min(l_start + TILE_L, L);
+            const size_t tile_l = l_end - l_start;
+
+            // Fill im2col: col_buf[tile_l, K_col]
+            for (size_t l = l_start; l < l_end; ++l) {
+                const size_t oh = l / W_out;
+                const size_t ow = l % W_out;
+                float* col_ptr = col_buf.data() + (l - l_start) * K_col;
+                size_t idx = 0;
+                for (size_t ic = 0; ic < C_in; ++ic) {
+                    const __fp16* Xic = in_n + ic * H * W;
+                    for (size_t kh = 0; kh < KH; ++kh) {
+                        for (size_t kw = 0; kw < KW; ++kw) {
+                            const ptrdiff_t ih = (ptrdiff_t)(oh * stride_h)
+                                                 - (ptrdiff_t)padding_h
+                                                 + (ptrdiff_t)(kh * dilation_h);
+                            const ptrdiff_t iw = (ptrdiff_t)(ow * stride_w)
+                                                 - (ptrdiff_t)padding_w
+                                                 + (ptrdiff_t)(kw * dilation_w);
+                            col_ptr[idx++] = (ih >= 0 && ih < (ptrdiff_t)H &&
+                                              iw >= 0 && iw < (ptrdiff_t)W)
+                                ? (float)Xic[ih * W + iw]
+                                : 0.0f;
+                        }
+                    }
+                }
+            }
+
+            // SGEMM: out_tile[C_out, tile_l] = W[C_out, K_col] × col^T[K_col, tile_l]
+            // col_buf is [tile_l, K_col]; use CblasTrans to treat it as [K_col, tile_l]
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        (int)C_out, (int)tile_l, (int)K_col,
+                        1.0f, W_f32.data(), (int)K_col,
+                        col_buf.data(), (int)K_col,
+                        0.0f, out_tile.data(), (int)tile_l);
+
+            // Write out_tile → NCHW output, adding bias
+            for (size_t oc = 0; oc < C_out; ++oc) {
+                const float b = bias ? (float)bias[oc] : 0.0f;
+                const float* src = out_tile.data() + oc * tile_l;
+                __fp16* dst = out_n + oc * L + l_start;
+                for (size_t l = 0; l < tile_l; ++l)
+                    dst[l] = (__fp16)(src[l] + b);
+            }
+        }
+    }
+}
+#endif  // __APPLE__
+
 void cactus_conv2d_f16(
     const __fp16* input,
     const __fp16* weight,
@@ -475,6 +603,27 @@ void cactus_conv2d_f16(
 ) {
     size_t H_out = (H + 2 * padding_h - dilation_h * (KH - 1) - 1) / stride_h + 1;
     size_t W_out = (W + 2 * padding_w - dilation_w * (KW - 1) - 1) / stride_w + 1;
+
+#ifdef __APPLE__
+    if (groups == 1) {
+        // 1×1 with no stride/padding: direct SGEMM on NCHW, no im2col
+        if (KH == 1 && KW == 1 &&
+            stride_h == 1 && stride_w == 1 &&
+            padding_h == 0 && padding_w == 0) {
+            conv2d_1x1_sgemm_f16(input, weight, bias, output, N, H, W, C_in, C_out);
+            return;
+        }
+        // General kernel size: im2col + SGEMM when K_col is large enough for BLAS to win
+        const size_t K_col = C_in * KH * KW;
+        if (K_col >= 64) {
+            conv2d_im2col_sgemm_f16(input, weight, bias, output,
+                                    N, H, W, C_in, C_out, KH, KW,
+                                    stride_h, stride_w, padding_h, padding_w,
+                                    dilation_h, dilation_w, H_out, W_out);
+            return;
+        }
+    }
+#endif
 
     size_t in_channels_per_group = C_in / groups;
     size_t out_channels_per_group = C_out / groups;
