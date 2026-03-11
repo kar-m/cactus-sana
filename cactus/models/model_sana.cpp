@@ -277,6 +277,18 @@ bool SanaModel::init(const std::string& model_folder, size_t context_size, const
             use_npu_vae_decoder_ = false;
             npu_vae_decoder_.reset();
         }
+
+        // Try to load CoreML transformer denoiser
+        std::string transformer_mlpackage = model_folder + "/transformer.mlpackage";
+        npu_transformer_ = npu::create_encoder();
+        if (npu_transformer_ && npu_transformer_->load(transformer_mlpackage)) {
+            use_npu_transformer_ = true;
+            npu_transformer_output_.resize(latent_channels_ * latents_h_ * latents_w_);
+            std::cout << "[Sana] ANE transformer loaded from " << transformer_mlpackage << std::endl;
+        } else {
+            use_npu_transformer_ = false;
+            npu_transformer_.reset();
+        }
     }
 
     initialized_ = true;

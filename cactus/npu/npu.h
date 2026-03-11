@@ -26,6 +26,17 @@ public:
                           const std::string& input_name = "x",
                           const std::string& output_name = "") = 0;
 
+    struct MultiInput {
+        const void* data;
+        std::vector<int> shape;
+        bool is_fp16;  // true = __fp16, false = float32
+    };
+
+    virtual size_t predict_multi(
+        const std::unordered_map<std::string, MultiInput>& inputs,
+        __fp16* output,
+        const std::string& output_name = "") { (void)inputs; (void)output; (void)output_name; return 0; }
+
     virtual bool is_available() const = 0;
 
     virtual std::vector<int> get_input_shape() const = 0;

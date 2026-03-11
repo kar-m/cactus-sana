@@ -445,6 +445,73 @@ size_t ANEEncoder::get_output_buffer_size() const {
     return impl.cachedOutputSize;
 }
 
+size_t ANEEncoder::predict_multi(
+    const std::unordered_map<std::string, MultiInput>& inputs,
+    __fp16* output,
+    const std::string& output_name) {
+    if (!impl_ || !output || inputs.empty()) return 0;
+
+    @autoreleasepool {
+        CactusANEImpl* impl = (__bridge CactusANEImpl*)impl_;
+        NSError* error = nil;
+
+        // Build input dictionary with MLMultiArrays
+        NSMutableDictionary* inputDict = [NSMutableDictionary dictionary];
+        for (const auto& [name, mi] : inputs) {
+            NSMutableArray<NSNumber*>* shape = [NSMutableArray arrayWithCapacity:mi.shape.size()];
+            for (int dim : mi.shape) [shape addObject:@(dim)];
+
+            NSUInteger totalElements = 1;
+            for (NSNumber* d in shape) totalElements *= [d unsignedIntegerValue];
+
+            MLMultiArrayDataType dtype = mi.is_fp16 ? MLMultiArrayDataTypeFloat16 : MLMultiArrayDataTypeFloat32;
+            MLMultiArray* arr = [[MLMultiArray alloc] initWithShape:shape dataType:dtype error:&error];
+            if (error) {
+                CACTUS_LOG_ERROR("npu", "predict_multi: failed to create array for " << name);
+                return 0;
+            }
+
+            size_t bytes = totalElements * (mi.is_fp16 ? sizeof(__fp16) : sizeof(float));
+            memcpy(arr.dataPointer, mi.data, bytes);
+
+            NSString* nsName = [NSString stringWithUTF8String:name.c_str()];
+            inputDict[nsName] = [MLFeatureValue featureValueWithMultiArray:arr];
+        }
+
+        id<MLFeatureProvider> inputProvider = [[MLDictionaryFeatureProvider alloc]
+            initWithDictionary:inputDict error:&error];
+        if (error) {
+            CACTUS_LOG_ERROR("npu", "predict_multi: failed to create feature provider");
+            return 0;
+        }
+
+        id<MLFeatureProvider> outputProvider = [impl.model predictionFromFeatures:inputProvider error:&error];
+        if (error) {
+            CACTUS_LOG_ERROR("npu", "predict_multi: prediction failed: " << [[error localizedDescription] UTF8String]);
+            return 0;
+        }
+
+        // Find output
+        NSString* outName = output_name.empty()
+            ? impl.modelDescription.outputDescriptionsByName.allKeys.firstObject
+            : [NSString stringWithUTF8String:output_name.c_str()];
+        MLFeatureValue* outputFeature = [outputProvider featureValueForName:outName];
+        MLMultiArray* mlOutput = outputFeature.multiArrayValue;
+        if (!mlOutput) return 0;
+
+        size_t count = mlOutput.count;
+        if (mlOutput.dataType == MLMultiArrayDataTypeFloat16) {
+            memcpy(output, mlOutput.dataPointer, count * sizeof(__fp16));
+        } else if (mlOutput.dataType == MLMultiArrayDataTypeFloat32) {
+            float* src = (float*)mlOutput.dataPointer;
+            for (size_t i = 0; i < count; i++) output[i] = (__fp16)src[i];
+        } else {
+            memcpy(output, mlOutput.dataPointer, count * sizeof(__fp16));
+        }
+        return count;
+    }
+}
+
 std::unique_ptr<NPUEncoder> create_encoder() {
         return std::make_unique<ANEEncoder>();
 }
