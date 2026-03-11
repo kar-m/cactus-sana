@@ -76,16 +76,6 @@ CACTUS_FFI_EXPORT int cactus_transcribe(
     size_t pcm_buffer_size
 );
 
-CACTUS_FFI_EXPORT int cactus_detect_language(
-    cactus_model_t model,
-    const char* audio_file_path,            // NULL if using pcm_buffer
-    char* response_buffer,
-    size_t buffer_size,
-    const char* options_json,               // optional
-    const uint8_t* pcm_buffer,              // NULL if using audio_file_path
-    size_t pcm_buffer_size
-);
-
 CACTUS_FFI_EXPORT cactus_stream_transcribe_t cactus_stream_transcribe_start(
     cactus_model_t model,
     const char* options_json                // optional
@@ -140,12 +130,48 @@ CACTUS_FFI_EXPORT int cactus_vad(
     size_t pcm_buffer_size
 );
 
+CACTUS_FFI_EXPORT int cactus_generate_image(
+    cactus_model_t model,
+    const char* prompt,
+    size_t width,
+    size_t height,
+    char* response_buffer,
+    size_t buffer_size
+);
+
+CACTUS_FFI_EXPORT int cactus_generate_image_to_image(
+    cactus_model_t model,
+    const char* prompt,
+    const char* init_image_path,
+    size_t width,
+    size_t height,
+    float strength,
+    char* response_buffer,
+    size_t buffer_size
+);
+
+// Retrieve RGB uint8 pixels from the last cactus_generate_image / cactus_generate_image_to_image call.
+// out_buffer must be at least 3 * (*out_width) * (*out_height) bytes.
+// Returns number of bytes written, or -1 on error.
+CACTUS_FFI_EXPORT int cactus_get_last_image_pixels_rgb(
+    cactus_model_t model,
+    uint8_t* out_buffer,
+    size_t buffer_size,
+    size_t* out_width,
+    size_t* out_height
+);
+
 CACTUS_FFI_EXPORT int cactus_rag_query(
     cactus_model_t model,
     const char* query,
     char* response_buffer,
     size_t buffer_size,
     size_t top_k
+);
+
+CACTUS_FFI_EXPORT void* cactus_get_output(
+    cactus_model_t model,
+    size_t node_id
 );
 
 
@@ -199,40 +225,9 @@ CACTUS_FFI_EXPORT void cactus_index_destroy(cactus_index_t index);
 
 CACTUS_FFI_EXPORT const char* cactus_get_last_error(void);
 
-CACTUS_FFI_EXPORT void cactus_set_telemetry_environment(const char* framework, const char* cache_location, const char* version);
-CACTUS_FFI_EXPORT void cactus_set_app_id(const char* app_id);
+CACTUS_FFI_EXPORT void cactus_set_telemetry_environment(const char* framework, const char* cache_location);
 CACTUS_FFI_EXPORT void cactus_telemetry_flush(void);
 CACTUS_FFI_EXPORT void cactus_telemetry_shutdown(void);
-
-// --- Sana image generation ---
-
-CACTUS_FFI_EXPORT int cactus_generate_image(
-    cactus_model_t model,
-    const char* prompt,
-    size_t width,
-    size_t height,
-    char* response_buffer,
-    size_t buffer_size
-);
-
-CACTUS_FFI_EXPORT int cactus_generate_image_to_image(
-    cactus_model_t model,
-    const char* prompt,
-    const char* init_image_path,
-    size_t width,
-    size_t height,
-    float strength,
-    char* response_buffer,
-    size_t buffer_size
-);
-
-CACTUS_FFI_EXPORT int cactus_get_last_image_pixels_rgb(
-    cactus_model_t model,
-    uint8_t* out_buffer,
-    size_t buffer_size,
-    size_t* out_width,
-    size_t* out_height
-);
 
 #ifdef __cplusplus
 }

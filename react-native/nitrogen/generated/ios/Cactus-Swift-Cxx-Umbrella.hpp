@@ -23,6 +23,7 @@ namespace margelo::nitro::cactus { class HybridCactusImageSpec; }
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 // C++ helpers for Swift
 #include "Cactus-Swift-Cxx-Bridge.hpp"

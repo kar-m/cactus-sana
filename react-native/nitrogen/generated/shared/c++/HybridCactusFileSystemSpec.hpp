@@ -19,6 +19,7 @@
 #include <NitroModules/Promise.hpp>
 #include <functional>
 #include <optional>
+#include <vector>
 
 namespace margelo::nitro::cactus {
 

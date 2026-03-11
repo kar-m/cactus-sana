@@ -30,6 +30,7 @@ namespace Cactus { class HybridCactusImageSpec_cxx; }
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 /**
  * Contains specialized versions of C++ templated types so they can be accessed from Swift,
@@ -196,6 +197,17 @@ namespace margelo::nitro::cactus::bridge::swift {
   }
   inline std::function<void(double /* progress */)> get_std__optional_std__function_void_double____progress______(const std::optional<std::function<void(double /* progress */)>>& optional) noexcept {
     return *optional;
+  }
+  
+  // pragma MARK: std::vector<double>
+  /**
+   * Specialized version of `std::vector<double>`.
+   */
+  using std__vector_double_ = std::vector<double>;
+  inline std::vector<double> create_std__vector_double_(size_t size) noexcept {
+    std::vector<double> vector;
+    vector.reserve(size);
+    return vector;
   }
   
   // pragma MARK: std::shared_ptr<HybridCactusFileSystemSpec>

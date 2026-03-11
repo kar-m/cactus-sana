@@ -18,6 +18,7 @@ namespace Cactus { class HybridCactusFileSystemSpec_cxx; }
 #include <NitroModules/Promise.hpp>
 #include <functional>
 #include <optional>
+#include <vector>
 
 #include "Cactus-Swift-Cxx-Umbrella.hpp"
 
@@ -137,6 +138,22 @@ namespace margelo::nitro::cactus {
     }
     inline std::shared_ptr<Promise<std::string>> getIndexPath(const std::string& name) override {
       auto __result = _swiftPart.getIndexPath(name);
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
+    inline std::shared_ptr<Promise<std::string>> writeTempPng(const std::vector<double>& pixels, double width, double height) override {
+      auto __result = _swiftPart.writeTempPng(pixels, std::forward<decltype(width)>(width), std::forward<decltype(height)>(height));
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
+    inline std::shared_ptr<Promise<void>> deleteTempFiles() override {
+      auto __result = _swiftPart.deleteTempFiles();
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }

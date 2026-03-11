@@ -11,6 +11,7 @@
 #include "Cactus-Swift-Cxx-Umbrella.hpp"
 #include "HybridCactusFileSystemSpecSwift.hpp"
 #include "HybridCactusImageSpecSwift.hpp"
+#include <NitroModules/NitroDefines.hpp>
 
 namespace margelo::nitro::cactus::bridge::swift {
 

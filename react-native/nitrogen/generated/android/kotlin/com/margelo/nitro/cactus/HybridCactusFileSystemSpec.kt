@@ -90,6 +90,14 @@ abstract class HybridCactusFileSystemSpec: HybridObject() {
   @DoNotStrip
   @Keep
   abstract fun getIndexPath(name: String): Promise<String>
+  
+  @DoNotStrip
+  @Keep
+  abstract fun writeTempPng(pixels: DoubleArray, width: Double, height: Double): Promise<String>
+  
+  @DoNotStrip
+  @Keep
+  abstract fun deleteTempFiles(): Promise<Unit>
 
   private external fun initHybrid(): HybridData
 

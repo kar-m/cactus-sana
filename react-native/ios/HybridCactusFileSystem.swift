@@ -138,6 +138,63 @@ class HybridCactusFileSystem: HybridCactusFileSystemSpec {
     return Promise.async { try self.indexURL(name: name).path }
   }
 
+  func writeTempPng(pixels: [Double], width: Double, height: Double) throws -> Promise<String> {
+    return Promise.async {
+      let w = Int(width)
+      let h = Int(height)
+      guard w > 0, h > 0, pixels.count == w * h * 4 else {
+        throw RuntimeError.error(withMessage: "Invalid pixel data: expected \(w * h * 4) RGBA values, got \(pixels.count)")
+      }
+
+      // Convert [Double] (0..1) to UInt8 RGBA bytes
+      var bytes = [UInt8](repeating: 0, count: w * h * 4)
+      for i in 0..<pixels.count {
+        bytes[i] = UInt8(min(max(pixels[i] * 255.0, 0), 255))
+      }
+
+      let colorSpace = CGColorSpaceCreateDeviceRGB()
+      guard let ctx = CGContext(
+        data: &bytes,
+        width: w,
+        height: h,
+        bitsPerComponent: 8,
+        bytesPerRow: w * 4,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+      ), let cgImage = ctx.makeImage() else {
+        throw RuntimeError.error(withMessage: "Failed to create CGImage from pixel data")
+      }
+
+      let tempDir = try self.tempURL()
+      let filePath = tempDir.appendingPathComponent(UUID().uuidString + ".png")
+
+      let uiImage = UIImage(cgImage: cgImage)
+      guard let pngData = uiImage.pngData() else {
+        throw RuntimeError.error(withMessage: "Failed to encode PNG data")
+      }
+      try pngData.write(to: filePath)
+      return filePath.path
+    }
+  }
+
+  func deleteTempFiles() throws -> Promise<Void> {
+    return Promise.async {
+      let tempDir = try self.tempURL()
+      if FileManager.default.fileExists(atPath: tempDir.path) {
+        try FileManager.default.removeItem(at: tempDir)
+      }
+    }
+  }
+
+  private func tempURL() throws -> URL {
+    let cactusURL = try self.cactusURL()
+    let tempURL = cactusURL.appendingPathComponent("temp", isDirectory: true)
+    if !FileManager.default.fileExists(atPath: tempURL.path) {
+      try FileManager.default.createDirectory(at: tempURL, withIntermediateDirectories: true)
+    }
+    return tempURL
+  }
+
   private func cactusURL() throws -> URL {
     let documentsURL = try FileManager.default.url(
       for: .documentDirectory,
