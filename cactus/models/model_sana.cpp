@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <chrono>
 
 namespace cactus {
 namespace engine {
@@ -77,30 +78,10 @@ bool SanaModel::init(const std::string& model_folder, size_t context_size, const
     chi_token_count_ = text_encoder_->get_tokenizer()->encode(std::string(kChiPrompt)).size();
     latent_channels_ = 32;
 
-    size_t image_width = 1024;
-    size_t image_height = 1024;
-    if (const char* size_env = std::getenv("CACTUS_SANA_IMAGE_SIZE")) {
-        const long parsed = std::strtol(size_env, nullptr, 10);
-        if (parsed > 0 && parsed % 32 == 0) {
-            image_width = static_cast<size_t>(parsed);
-            image_height = static_cast<size_t>(parsed);
-        }
-    }
-    if (const char* width_env = std::getenv("CACTUS_SANA_IMAGE_WIDTH")) {
-        const long parsed = std::strtol(width_env, nullptr, 10);
-        if (parsed > 0 && parsed % 32 == 0) {
-            image_width = static_cast<size_t>(parsed);
-        }
-    }
-    if (const char* height_env = std::getenv("CACTUS_SANA_IMAGE_HEIGHT")) {
-        const long parsed = std::strtol(height_env, nullptr, 10);
-        if (parsed > 0 && parsed % 32 == 0) {
-            image_height = static_cast<size_t>(parsed);
-        }
-    }
-
-    latents_h_ = image_height / 32;
-    latents_w_ = image_width / 32;
+    // Diffusion always runs at native 1024px (32x32 latents) for best quality.
+    // CACTUS_SANA_IMAGE_SIZE only affects the output (downscaled after VAE decode).
+    latents_h_ = 32;
+    latents_w_ = 32;
     if (const char* steps_env = std::getenv("CACTUS_SANA_STEPS")) {
         const long parsed = std::strtol(steps_env, nullptr, 10);
         if (parsed > 0 && parsed <= 128) {
@@ -278,17 +259,22 @@ bool SanaModel::init(const std::string& model_folder, size_t context_size, const
             npu_vae_decoder_.reset();
         }
 
-        // Try to load CoreML transformer denoiser
-        std::string transformer_mlpackage = model_folder + "/transformer.mlpackage";
-        npu_transformer_ = npu::create_encoder();
-        if (npu_transformer_ && npu_transformer_->load(transformer_mlpackage)) {
-            use_npu_transformer_ = true;
-            npu_transformer_output_.resize(latent_channels_ * latents_h_ * latents_w_);
-            std::cout << "[Sana] ANE transformer loaded from " << transformer_mlpackage << std::endl;
+        // Fused 4-step diffusion + VAE pipeline
+        std::string pipeline_path = model_folder + "/full_pipeline_4step.mlpackage";
+        npu_full_pipeline_ = npu::create_encoder();
+        if (npu_full_pipeline_ && npu_full_pipeline_->load(pipeline_path)) {
+            use_npu_full_pipeline_ = false;
+            size_t image_h = latents_h_ * 32;
+            size_t image_w = latents_w_ * 32;
+            npu_pipeline_output_.resize(3 * image_h * image_w);
+            std::cout << "[Sana] ANE full pipeline (4-step diff+VAE) loaded" << std::endl;
         } else {
-            use_npu_transformer_ = false;
-            npu_transformer_.reset();
+            use_npu_full_pipeline_ = false;
+            npu_full_pipeline_.reset();
         }
+
+        // Text encoder stays on CPU to avoid GPU/ANE resource contention
+        // with the fused pipeline (two large CoreML models thrash the device)
     }
 
     initialized_ = true;
@@ -305,14 +291,6 @@ bool SanaModel::init(const std::string& model_folder, size_t context_size, const
 void SanaModel::validate_dimensions(size_t width, size_t height) const {
     if (width % 32 != 0 || height % 32 != 0) {
         throw std::runtime_error("SanaModel requires width and height divisible by 32.");
-    }
-    const size_t expected_w = latents_w_ * 32;
-    const size_t expected_h = latents_h_ * 32;
-    if (width != expected_w || height != expected_h) {
-        throw std::runtime_error(
-            "SanaModel currently uses a fixed latent grid; expected " +
-            std::to_string(expected_w) + "x" + std::to_string(expected_h) + "."
-        );
     }
 }
 
@@ -337,36 +315,63 @@ std::vector<__fp16> SanaModel::encode_prompt_to_fp16(const std::string& prompt) 
     while (tokens.size() < max_tokens)
         tokens.push_back(text_encoder_->get_tokenizer()->get_eos_token());
 
-    auto embeds = text_encoder_->get_embeddings(tokens, false, false);
-    const size_t expected_full = max_tokens * text_encoder_dim_;
-    if (embeds.size() != expected_full) {
-        throw std::runtime_error("Unexpected text embedding size from Gemma2 encoder.");
-    }
-
-    // For Sana 1.0: select positions [0] + [max_tokens-299 ... max_tokens-1] → 300 tokens
-    // For Sprint: positions [0..299] (direct copy, max_tokens == kMaxPromptTokens)
-    std::vector<__fp16> out(kMaxPromptTokens * text_encoder_dim_);
+    // Select final kMaxPromptTokens tokens for the encoder
+    // For CHI: BOS + last 299 from extended sequence. For non-CHI: first 300.
+    std::vector<uint32_t> final_tokens(kMaxPromptTokens);
     std::vector<bool> selected_real(kMaxPromptTokens, false);
 
     if (!use_chi) {
-        for (size_t i = 0; i < kMaxPromptTokens * text_encoder_dim_; ++i)
-            out[i] = static_cast<__fp16>(embeds[i]);
-        for (size_t j = 0; j < full_real_len; ++j)
-            selected_real[j] = true;
+        for (size_t i = 0; i < kMaxPromptTokens && i < tokens.size(); ++i) {
+            final_tokens[i] = tokens[i];
+            selected_real[i] = (i < full_real_len);
+        }
+        for (size_t i = tokens.size(); i < kMaxPromptTokens; ++i)
+            final_tokens[i] = text_encoder_->get_tokenizer()->get_eos_token();
     } else {
-        // Position 0 (BOS) → always real
-        for (size_t d = 0; d < text_encoder_dim_; ++d)
-            out[d] = static_cast<__fp16>(embeds[d]);
-        selected_real[0] = (0 < full_real_len);  // always true
-
-        // Last 299 positions from the extended sequence.
-        // HF formula: tail_start = num_chi_tokens_with_bos - 1 = chi_token_count_ (no BOS)
+        final_tokens[0] = tokens[0]; // BOS
+        selected_real[0] = true;
         const size_t tail_start = chi_token_count_;
         for (size_t k = 1; k < kMaxPromptTokens; ++k) {
             const size_t src_pos = tail_start + (k - 1);
-            for (size_t d = 0; d < text_encoder_dim_; ++d)
-                out[k * text_encoder_dim_ + d] = static_cast<__fp16>(embeds[src_pos * text_encoder_dim_ + d]);
+            final_tokens[k] = (src_pos < tokens.size()) ? tokens[src_pos] : text_encoder_->get_tokenizer()->get_eos_token();
             selected_real[k] = (src_pos < full_real_len);
+        }
+    }
+
+    // Encode: ANE fast path or CPU fallback
+    std::vector<__fp16> out(kMaxPromptTokens * text_encoder_dim_);
+
+    if (use_npu_text_encoder_ && npu_text_encoder_ && npu_text_encoder_->is_available()) {
+        // ANE: feed int32 token IDs directly to CoreML Gemma2
+        std::vector<int32_t> input_ids(kMaxPromptTokens);
+        for (size_t i = 0; i < kMaxPromptTokens; ++i)
+            input_ids[i] = static_cast<int32_t>(final_tokens[i]);
+
+        std::vector<__fp16> enc_output(kMaxPromptTokens * text_encoder_dim_);
+        std::unordered_map<std::string, npu::NPUEncoder::MultiInput> inputs;
+        inputs["input_ids"] = {input_ids.data(), {1, static_cast<int>(kMaxPromptTokens)}, npu::NPUEncoder::DataType::INT32};
+        npu_text_encoder_->predict_multi(inputs, enc_output.data());
+        out = std::move(enc_output);
+    } else {
+        // CPU: run Gemma2 through CactusGraph
+        auto embeds = text_encoder_->get_embeddings(tokens, false, false);
+        const size_t expected_full = max_tokens * text_encoder_dim_;
+        if (embeds.size() != expected_full) {
+            throw std::runtime_error("Unexpected text embedding size from Gemma2 encoder.");
+        }
+
+        if (!use_chi) {
+            for (size_t i = 0; i < kMaxPromptTokens * text_encoder_dim_; ++i)
+                out[i] = static_cast<__fp16>(embeds[i]);
+        } else {
+            for (size_t d = 0; d < text_encoder_dim_; ++d)
+                out[d] = static_cast<__fp16>(embeds[d]);
+            const size_t tail_start = chi_token_count_;
+            for (size_t k = 1; k < kMaxPromptTokens; ++k) {
+                const size_t src_pos = tail_start + (k - 1);
+                for (size_t d = 0; d < text_encoder_dim_; ++d)
+                    out[k * text_encoder_dim_ + d] = static_cast<__fp16>(embeds[src_pos * text_encoder_dim_ + d]);
+            }
         }
     }
 
@@ -392,19 +397,54 @@ size_t SanaModel::generate_image(const std::string& prompt, size_t width, size_t
     std::cout << "[Sana] Starting image generation (" << width << "x" << height << ")" << std::endl;
     const size_t total_latents = latent_channels_ * latents_h_ * latents_w_;
     
+    auto t0 = std::chrono::steady_clock::now();
     auto prompt_embeds = encode_prompt_to_fp16(prompt);
+    auto t1 = std::chrono::steady_clock::now();
 
     std::cout << "[Sana] Generating initial noise..." << std::endl;
-    // Initial latents: plain randn (SCMScheduler init_noise_sigma=1.0)
     auto latents = make_noise_latents(total_latents);
 
+    // ANE fused pipeline: 4-step diffusion + VAE in one call
+    if (use_npu_full_pipeline_ && npu_full_pipeline_) {
+        auto noise1 = make_noise_latents(total_latents);
+        auto noise2 = make_noise_latents(total_latents);
+        auto noise3 = make_noise_latents(total_latents);
+
+        float guidance = kGuidanceScale;
+        std::unordered_map<std::string, npu::NPUEncoder::MultiInput> inputs;
+        inputs["latents"] = {latents.data(), {1, static_cast<int>(latent_channels_), static_cast<int>(latents_h_), static_cast<int>(latents_w_)}, npu::NPUEncoder::DataType::FP16};
+        inputs["encoder_hidden_states"] = {prompt_embeds.data(), {1, static_cast<int>(kMaxPromptTokens), static_cast<int>(text_encoder_dim_)}, npu::NPUEncoder::DataType::FP16};
+        inputs["guidance"] = {&guidance, {1}, npu::NPUEncoder::DataType::FP32};
+        inputs["noise1"] = {noise1.data(), {1, static_cast<int>(latent_channels_), static_cast<int>(latents_h_), static_cast<int>(latents_w_)}, npu::NPUEncoder::DataType::FP16};
+        inputs["noise2"] = {noise2.data(), {1, static_cast<int>(latent_channels_), static_cast<int>(latents_h_), static_cast<int>(latents_w_)}, npu::NPUEncoder::DataType::FP16};
+        inputs["noise3"] = {noise3.data(), {1, static_cast<int>(latent_channels_), static_cast<int>(latents_h_), static_cast<int>(latents_w_)}, npu::NPUEncoder::DataType::FP16};
+
+        auto t2 = std::chrono::steady_clock::now();
+        npu_full_pipeline_->predict_multi(inputs, npu_pipeline_output_.data());
+        auto t3 = std::chrono::steady_clock::now();
+
+        auto ms = [](auto a, auto b) { return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count(); };
+        std::cout << "[Sana] Breakdown: text=" << ms(t0,t1) << "ms pipeline(ANE)=" << ms(t2,t3) << "ms" << std::endl;
+
+        return kDecoderNodeFlag | decoder_output_node_;
+    }
+
+    // CPU fallback
+    auto t2 = std::chrono::steady_clock::now();
     if (has_guidance_embeds_) {
         run_diffusion(prompt_embeds, latents, diffusion_steps_);
     } else {
         run_diffusion_flow_euler(prompt_embeds, latents, diffusion_steps_);
     }
+    auto t3 = std::chrono::steady_clock::now();
 
-    return decode_latents(latents);
+    auto result = decode_latents(latents);
+    auto t4 = std::chrono::steady_clock::now();
+
+    auto ms = [](auto a, auto b) { return std::chrono::duration_cast<std::chrono::milliseconds>(b - a).count(); };
+    std::cout << "[Sana] Breakdown: text=" << ms(t0,t1) << "ms diffusion=" << ms(t2,t3) << "ms vae=" << ms(t3,t4) << "ms" << std::endl;
+
+    return result;
 }
 
 size_t SanaModel::generate_image_to_image(const std::string& prompt, const std::string& init_image_path,
@@ -479,7 +519,11 @@ size_t SanaModel::generate_image_to_image(const std::string& prompt, const std::
 
 void* SanaModel::get_output_pointer(size_t encoded_node_id) const {
     if ((encoded_node_id & kDecoderNodeFlag) != 0) {
-        // ANE path: return the pre-allocated output buffer
+        // Fused pipeline output
+        if (use_npu_full_pipeline_ && !npu_pipeline_output_.empty()) {
+            return const_cast<void*>(static_cast<const void*>(npu_pipeline_output_.data()));
+        }
+        // VAE-only ANE output
         if (use_npu_vae_decoder_ && !npu_vae_output_.empty()) {
             return const_cast<void*>(static_cast<const void*>(npu_vae_output_.data()));
         }

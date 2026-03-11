@@ -632,69 +632,6 @@ void cactus_conv2d_f16(
     size_t out_bs = C_out * H_out * W_out;
     size_t w_bs = in_channels_per_group * KH * KW; // Weight size per output channel
 
-    // Fast path: depthwise conv2d (groups == C_in == C_out, in_channels_per_group == 1)
-    // with stride=1, dilation=1. Vectorizes across output width using NEON.
-    if (in_channels_per_group == 1 && out_channels_per_group == 1 &&
-        stride_h == 1 && stride_w == 1 && dilation_h == 1 && dilation_w == 1) {
-
-        CactusThreading::parallel_for_2d(N, C_out, CactusThreading::Thresholds::ATTENTION, [&](size_t n, size_t oc) {
-            const __fp16* Xc = input + n * in_bs + oc * (H * W);
-            const __fp16* Wc = weight + oc * (KH * KW);
-            __fp16* Yoc = output + n * out_bs + oc * (H_out * W_out);
-            float b = bias ? (float)bias[oc] : 0.0f;
-
-            // Preload kernel weights into float (max kernel 7x7 = 49)
-            float w_f32[49];
-            for (size_t i = 0; i < KH * KW; ++i) w_f32[i] = (float)Wc[i];
-
-            for (size_t oh = 0; oh < H_out; ++oh) {
-                size_t ow = 0;
-                // NEON: process 4 output pixels at a time
-                for (; ow + 4 <= W_out; ow += 4) {
-                    float32x4_t acc = vdupq_n_f32(b);
-                    for (size_t kh = 0; kh < KH; ++kh) {
-                        ptrdiff_t ih = (ptrdiff_t)oh - (ptrdiff_t)padding_h + (ptrdiff_t)kh;
-                        if (ih < 0 || ih >= (ptrdiff_t)H) continue;
-                        const __fp16* row = Xc + ih * W;
-                        for (size_t kw = 0; kw < KW; ++kw) {
-                            ptrdiff_t iw_base = (ptrdiff_t)ow - (ptrdiff_t)padding_w + (ptrdiff_t)kw;
-                            float wv = w_f32[kh * KW + kw];
-                            float32x4_t wvec = vdupq_n_f32(wv);
-                            // Load 4 consecutive input pixels
-                            float xvals[4];
-                            for (int p = 0; p < 4; ++p) {
-                                ptrdiff_t iw = iw_base + p;
-                                xvals[p] = (iw >= 0 && iw < (ptrdiff_t)W) ? (float)row[iw] : 0.0f;
-                            }
-                            float32x4_t xvec = vld1q_f32(xvals);
-                            acc = vfmaq_f32(acc, xvec, wvec);
-                        }
-                    }
-                    // Store 4 results
-                    float tmp[4];
-                    vst1q_f32(tmp, acc);
-                    for (int p = 0; p < 4; ++p) Yoc[oh * W_out + ow + p] = (__fp16)tmp[p];
-                }
-                // Scalar remainder
-                for (; ow < W_out; ++ow) {
-                    float sum = b;
-                    for (size_t kh = 0; kh < KH; ++kh) {
-                        ptrdiff_t ih = (ptrdiff_t)oh - (ptrdiff_t)padding_h + (ptrdiff_t)kh;
-                        if (ih < 0 || ih >= (ptrdiff_t)H) continue;
-                        const __fp16* row = Xc + ih * W;
-                        for (size_t kw = 0; kw < KW; ++kw) {
-                            ptrdiff_t iw = (ptrdiff_t)ow - (ptrdiff_t)padding_w + (ptrdiff_t)kw;
-                            if (iw >= 0 && iw < (ptrdiff_t)W)
-                                sum += (float)row[iw] * w_f32[kh * KW + kw];
-                        }
-                    }
-                    Yoc[oh * W_out + ow] = (__fp16)sum;
-                }
-            }
-        });
-        return;
-    }
-
     const size_t total_compute = N * C_out * H_out * W_out * in_channels_per_group * KH * KW;
     CactusThreading::ParallelConfig config = (total_compute < 100000)
         ? CactusThreading::ParallelConfig{SIZE_MAX, SIZE_MAX}

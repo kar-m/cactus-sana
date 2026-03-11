@@ -8,10 +8,6 @@
 #include <assert.h>
 #include <algorithm>
 
-#ifdef __APPLE__
-#include <Accelerate/Accelerate.h>
-#endif
-
 namespace {
     thread_local std::vector<__fp16> transpose_buffer_fp16;
     thread_local std::vector<int8_t> quant_activation_buffer;
@@ -580,110 +576,55 @@ void compute_linear_attention_node(GraphNode& node, const std::vector<std::uniqu
     // Equivalent formula: out = Q @ (K^T V) / (Q @ k_sum + eps)
     // where k_sum[d] = sum_l relu(K[l, d])
     // Q and K have ReLU applied here (matching HF's nonlinearity applied before attention).
-    //
-    // Optimized: use cblas_sgemm (Accelerate) for the two dense matmuls per head:
-    //   KV = K_relu^T @ V    [D x L] @ [L x D] = [D x D]
-    //   out = Q_relu @ KV    [L x D] @ [D x D] = [L x D]
 
-    const size_t LD = seq_len * head_dim;  // elements per head
+    for (size_t b = 0; b < batch_size; ++b) {
+        for (size_t h = 0; h < num_heads; ++h) {
+            size_t head_offset = (b * num_heads + h) * seq_len * head_dim;
 
-    // Parallel across batch*heads
-    const size_t total_heads = batch_size * num_heads;
+            // 1. Compute K^T * V (dim x dim matrix) and k_sum (using float for speed)
+            std::vector<float> kv_matrix(head_dim * head_dim, 0.0f);
+            std::vector<float> k_sum(head_dim, 0.0f);
 
-    CactusThreading::parallel_for(total_heads, CactusThreading::Thresholds::SCALAR_EXPENSIVE,
-        [&](size_t head_start, size_t head_end) {
-        // Per-thread scratch buffers
-        std::vector<float> q_f32(seq_len * head_dim);
-        std::vector<float> k_f32(seq_len * head_dim);
-        std::vector<float> v_f32(seq_len * head_dim);
-        std::vector<float> kv_matrix(head_dim * head_dim);
-        std::vector<float> out_f32(seq_len * head_dim);
-        std::vector<float> k_sum(head_dim);
-
-        for (size_t bh = head_start; bh < head_end; ++bh) {
-            size_t head_offset = bh * LD;
-
-            // 1. Convert FP16 -> FP32 with ReLU on Q and K, plain copy for V
-            for (size_t i = 0; i < LD; ++i) {
-                float qv = static_cast<float>(q_ptr[head_offset + i]);
-                q_f32[i] = qv > 0.0f ? qv : 0.0f;
-                float kv = static_cast<float>(k_ptr[head_offset + i]);
-                k_f32[i] = kv > 0.0f ? kv : 0.0f;
-                v_f32[i] = static_cast<float>(v_ptr[head_offset + i]);
-            }
-
-            // 2. k_sum[d] = sum over seq of k_relu[:, d]
-            std::fill(k_sum.begin(), k_sum.end(), 0.0f);
             for (size_t l = 0; l < seq_len; ++l) {
-                const float* k_row = &k_f32[l * head_dim];
-                for (size_t d = 0; d < head_dim; ++d) {
-                    k_sum[d] += k_row[d];
-                }
-            }
-
-#ifdef __APPLE__
-            // 3. KV = K_relu^T @ V  ->  [D x D]
-            //    K_relu is [L x D] (row-major), V is [L x D] (row-major)
-            //    We want K^T @ V = [D x L] @ [L x D] = [D x D]
-            cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                        (int)head_dim, (int)head_dim, (int)seq_len,
-                        1.0f, k_f32.data(), (int)head_dim,
-                        v_f32.data(), (int)head_dim,
-                        0.0f, kv_matrix.data(), (int)head_dim);
-
-            // 4. out = Q_relu @ KV  ->  [L x D]
-            //    Q_relu is [L x D], KV is [D x D]
-            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                        (int)seq_len, (int)head_dim, (int)head_dim,
-                        1.0f, q_f32.data(), (int)head_dim,
-                        kv_matrix.data(), (int)head_dim,
-                        0.0f, out_f32.data(), (int)head_dim);
-#else
-            // Fallback: manual matmuls
-            std::fill(kv_matrix.begin(), kv_matrix.end(), 0.0f);
-            for (size_t l = 0; l < seq_len; ++l) {
-                const float* k_row = &k_f32[l * head_dim];
-                const float* v_row = &v_f32[l * head_dim];
+                size_t token_offset = head_offset + l * head_dim;
                 for (size_t d1 = 0; d1 < head_dim; ++d1) {
-                    float kv_val = k_row[d1];
-                    float* kv_dst = &kv_matrix[d1 * head_dim];
+                    float k_val = static_cast<float>(k_ptr[token_offset + d1]);
+                    if (k_val < 0.0f) k_val = 0.0f; // ReLU
+                    k_sum[d1] += k_val;
+
+                    float* kv_row = &kv_matrix[d1 * head_dim];
                     for (size_t d2 = 0; d2 < head_dim; ++d2) {
-                        kv_dst[d2] += kv_val * v_row[d2];
+                        kv_row[d2] += k_val * static_cast<float>(v_ptr[token_offset + d2]);
                     }
                 }
             }
+
+            // 2. Compute Q * (K^T * V) normalized
+            std::vector<float> q_vals(head_dim);
             for (size_t l = 0; l < seq_len; ++l) {
-                const float* q_row = &q_f32[l * head_dim];
-                float* o_row = &out_f32[l * head_dim];
+                size_t token_offset = head_offset + l * head_dim;
+
+                float denom_val = 1e-15f;
+                for (size_t d1 = 0; d1 < head_dim; ++d1) {
+                    float q_val = static_cast<float>(q_ptr[token_offset + d1]);
+                    if (q_val < 0.0f) q_val = 0.0f; // ReLU
+                    q_vals[d1] = q_val;
+                    denom_val += q_val * k_sum[d1];
+                }
+
+                float inv_denom = 1.0f / denom_val;
                 for (size_t d2 = 0; d2 < head_dim; ++d2) {
-                    float val = 0.0f;
+                    float out_val = 0.0f;
                     for (size_t d1 = 0; d1 < head_dim; ++d1) {
-                        val += q_row[d1] * kv_matrix[d1 * head_dim + d2];
+                        out_val += q_vals[d1] * kv_matrix[d1 * head_dim + d2];
                     }
-                    o_row[d2] = val;
-                }
-            }
-#endif
-
-            // 5. Normalize: out[l, d] /= (Q_relu[l, :] . k_sum + eps)
-            for (size_t l = 0; l < seq_len; ++l) {
-                const float* q_row = &q_f32[l * head_dim];
-                float denom = 1e-15f;
-                for (size_t d = 0; d < head_dim; ++d) {
-                    denom += q_row[d] * k_sum[d];
-                }
-                float inv_denom = 1.0f / denom;
-
-                float* o_row = &out_f32[l * head_dim];
-                __fp16* dst = &out_ptr[head_offset + l * head_dim];
-                for (size_t d = 0; d < head_dim; ++d) {
-                    float val = o_row[d] * inv_denom;
-                    val = std::max(-65504.0f, std::min(65504.0f, val));
-                    dst[d] = static_cast<__fp16>(val);
+                    float final_val = out_val * inv_denom;
+                    final_val = std::max(-65504.0f, std::min(65504.0f, final_val));
+                    out_ptr[token_offset + d2] = static_cast<__fp16>(final_val);
                 }
             }
         }
-    });
+    }
 }
 
 void compute_attention_int8_hybrid_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map) {

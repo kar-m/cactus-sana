@@ -26,10 +26,12 @@ public:
                           const std::string& input_name = "x",
                           const std::string& output_name = "") = 0;
 
+    enum class DataType { FP16, FP32, INT32 };
+
     struct MultiInput {
         const void* data;
         std::vector<int> shape;
-        bool is_fp16;  // true = __fp16, false = float32
+        DataType dtype;
     };
 
     virtual size_t predict_multi(

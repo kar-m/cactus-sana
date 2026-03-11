@@ -69,9 +69,14 @@ private:
     bool use_npu_vae_decoder_ = false;
     std::vector<__fp16> npu_vae_output_;
 
-    std::unique_ptr<npu::NPUEncoder> npu_transformer_;
-    bool use_npu_transformer_ = false;
-    mutable std::vector<__fp16> npu_transformer_output_;
+    // Fused diffusion+VAE pipeline (4-step diffusion + VAE decode in one ANE call)
+    std::unique_ptr<npu::NPUEncoder> npu_full_pipeline_;
+    bool use_npu_full_pipeline_ = false;
+    mutable std::vector<__fp16> npu_pipeline_output_;
+
+    // Text encoder on ANE
+    std::unique_ptr<npu::NPUEncoder> npu_text_encoder_;
+    bool use_npu_text_encoder_ = false;
 
     size_t text_encoder_dim_ = 2304;
     size_t chi_token_count_ = 0;  // precomputed: encode(kChiPrompt).size() (no BOS) = tail_start for token selection

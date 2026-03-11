@@ -13,6 +13,7 @@ OUT   = "results"
 os.makedirs(OUT, exist_ok=True)
 os.environ["CACTUS_SANA_IMAGE_SIZE"] = str(SIZE)
 os.environ["CACTUS_SANA_SEED"]       = "42"
+os.environ["CACTUS_SANA_STEPS"]      = "4"
 
 PROMPTS = [
     ("t2i_01_astronaut",   "an astronaut floating in space, Earth visible behind, photorealistic"),
@@ -44,8 +45,11 @@ try:
         arr  = np.frombuffer(fp16, dtype=np.float16).astype(np.float32)
         arr  = arr.reshape(3, h, w).transpose(1, 2, 0)
         arr  = np.clip((arr + 1.0) / 2.0, 0.0, 1.0) * 255
+        img  = Image.fromarray(arr.astype(np.uint8))
+        if SIZE != w or SIZE != h:
+            img = img.resize((SIZE, SIZE), Image.LANCZOS)
         out_path = f"{OUT}/{name}.png"
-        Image.fromarray(arr.astype(np.uint8)).save(out_path)
+        img.save(out_path)
         print(f"  {res['total_time_ms']:.0f}ms → {out_path}")
 finally:
     cactus.cactus_destroy(model)

@@ -96,10 +96,12 @@ int cactus_generate_image(
         CACTUS_LOG_INFO("generate_image", "Image generation completed in "
                         << std::fixed << std::setprecision(2) << total_time_ms << "ms");
 
-        // Extract and store pixels for cactus_get_last_image_pixels_rgb
+        // Sana always decodes at native 1024x1024 (32x32 latents * 32)
+        size_t decode_w = 1024, decode_h = 1024;
+
         void* raw_ptr = cactus_get_output(model, output_node);
         if (raw_ptr) {
-            store_image_pixels(handle, raw_ptr, width, height);
+            store_image_pixels(handle, raw_ptr, decode_w, decode_h);
         }
 
         std::ostringstream json;
@@ -107,8 +109,8 @@ int cactus_generate_image(
         json << "\"success\":true,";
         json << "\"error\":null,";
         json << "\"output_node\":" << output_node << ",";
-        json << "\"width\":" << width << ",";
-        json << "\"height\":" << height << ",";
+        json << "\"width\":" << decode_w << ",";
+        json << "\"height\":" << decode_h << ",";
         json << "\"total_time_ms\":" << std::fixed << std::setprecision(2) << total_time_ms << ",";
         json << "\"ram_usage_mb\":" << std::fixed << std::setprecision(2) << get_ram_usage_mb();
         json << "}";

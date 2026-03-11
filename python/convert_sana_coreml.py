@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-Convert Sana components to CoreML (.mlpackage) for Apple ANE acceleration.
-
-Converts:
-  1. VAE decoder (AutoencoderDC) — ~50x speedup on decode
-  2. Text encoder (Gemma2-2B) — ~8x speedup on prompt encoding
+Convert Sana AutoencoderDC decoder to CoreML (.mlpackage) for Apple ANE acceleration.
 
 Usage:
-    python python/convert_sana_coreml.py --output ./weights/sana-0.6b --latent-size 16
-    python python/convert_sana_coreml.py --output ./weights/sana-0.6b --skip-vae  # text encoder only
+    python python/convert_sana_coreml.py --output ./weights/sana-0.6b
+    python python/convert_sana_coreml.py --output ./weights/sana-0.6b --validate --latent-size 32
 
 Prerequisites:
-    pip install torch diffusers transformers coremltools
+    pip install torch diffusers coremltools
 """
 import argparse
-import os
 import time
 from pathlib import Path
 
@@ -331,267 +326,30 @@ def convert_vae_decoder_to_coreml(
     print(f"{'='*60}")
 
 
-def convert_transformer_to_coreml(
-    output_dir: str,
-    model_id: str = "Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers",
-    latent_size: int = 16,
-    latent_channels: int = 32,
-    max_tokens: int = 300,
-    caption_channels: int = 2304,
-    validate: bool = False,
-):
-    """Convert SanaTransformer2DModel to CoreML .mlpackage for ANE acceleration."""
-    import coremltools as ct
-    from diffusers import SanaTransformer2DModel
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    mlpackage_path = output_dir / "transformer.mlpackage"
-
-    print(f"\n{'='*60}")
-    print("Converting transformer denoiser to CoreML")
-    print(f"{'='*60}")
-    print(f"  Model: {model_id}")
-    print(f"  Latent shape: [1, {latent_channels}, {latent_size}, {latent_size}]")
-
-    print("  Loading SanaTransformer2DModel...")
-    transformer = SanaTransformer2DModel.from_pretrained(
-        model_id, subfolder="transformer", torch_dtype=torch.float32
-    ).eval()
-
-    # Wrapper: return just the sample tensor, avoid return_dict kwarg in export
-    class TransformerWrapper(nn.Module):
-        def __init__(self, transformer):
-            super().__init__()
-            self.transformer = transformer
-
-        def forward(self, hidden_states, encoder_hidden_states, timestep, guidance):
-            return self.transformer(
-                hidden_states=hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                timestep=timestep,
-                guidance=guidance,
-                return_dict=False,
-            )[0]
-
-    wrapper = TransformerWrapper(transformer).eval()
-
-    dummy_hidden = torch.randn(1, latent_channels, latent_size, latent_size)
-    dummy_enc = torch.randn(1, max_tokens, caption_channels)
-    dummy_t = torch.tensor([500.0])
-    dummy_g = torch.tensor([4.5])
-
-    # Use torch.export (handles dynamic shapes better than torch.jit.trace for transformers)
-    print("  Exporting with torch.export...")
-    t0 = time.time()
-    exported = torch.export.export(wrapper, (dummy_hidden, dummy_enc, dummy_t, dummy_g))
-    exported = exported.run_decompositions({})
-    print(f"  Exported in {time.time() - t0:.1f}s")
-
-    if validate:
-        print("  Validating export accuracy...")
-        with torch.no_grad():
-            ref_out = wrapper(dummy_hidden, dummy_enc, dummy_t, dummy_g)
-        # Run exported model
-        export_out = exported.module()(dummy_hidden, dummy_enc, dummy_t, dummy_g)
-        max_err = (ref_out - export_out).abs().max().item()
-        print(f"  Max error (original vs exported): {max_err:.6f}")
-
-    print("  Converting to CoreML mlprogram...")
-    t0 = time.time()
-
-    mlmodel = ct.convert(
-        exported,
-        convert_to="mlprogram",
-        compute_precision=ct.precision.FLOAT32,
-        minimum_deployment_target=ct.target.iOS17,
-        compute_units=ct.ComputeUnit.ALL,
-    )
-    print(f"  Converted in {time.time() - t0:.1f}s")
-
-    mlmodel.save(str(mlpackage_path))
-    print(f"  Saved to {mlpackage_path}")
-
-    if validate:
-        print("  Validating CoreML prediction...")
-        try:
-            pred = mlmodel.predict({
-                "hidden_states": dummy_hidden.numpy(),
-                "encoder_hidden_states": dummy_enc.numpy(),
-                "timestep": dummy_t.numpy(),
-                "guidance": dummy_g.numpy(),
-            })
-            coreml_out = list(pred.values())[0]
-            ref_np = ref_out.detach().numpy()
-            max_err = np.abs(coreml_out.astype(np.float32) - ref_np.astype(np.float32)).max()
-            print(f"  Max error (original vs CoreML): {max_err:.6f}")
-        except Exception as e:
-            print(f"  CoreML validation skipped: {e}")
-
-    del transformer, wrapper, exported, mlmodel
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-    print(f"\n{'='*60}")
-    print(f"Transformer CoreML conversion complete: {mlpackage_path}")
-    print(f"{'='*60}")
-
-
-def convert_text_encoder_to_coreml(
-    output_dir: str,
-    text_encoder_id: str = "google/gemma-2-2b-it",
-    max_tokens: int = 300,
-    validate: bool = False,
-):
-    """Convert Gemma2 text encoder to CoreML .mlpackage for ANE acceleration."""
-    import coremltools as ct
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    output_dir = Path(output_dir)
-    te_dir = output_dir / "text_encoder"
-    te_dir.mkdir(parents=True, exist_ok=True)
-    mlpackage_path = te_dir / "model.mlpackage"
-
-    print(f"\n{'='*60}")
-    print("Converting text encoder to CoreML")
-    print(f"{'='*60}")
-    print(f"  Model: {text_encoder_id}")
-    print(f"  Max tokens: {max_tokens}")
-
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-
-    print("  Loading Gemma2...")
-    model = AutoModelForCausalLM.from_pretrained(
-        text_encoder_id, torch_dtype=torch.float32, token=hf_token
-    ).eval()
-
-    hidden_dim = model.config.hidden_size
-    print(f"  Hidden dim: {hidden_dim}")
-
-    # Wrapper: tokens → final hidden states (no LM head, no causal mask)
-    class TextEncoderWrapper(nn.Module):
-        def __init__(self, gemma_model, seq_len):
-            super().__init__()
-            self.model = gemma_model.model
-            self.seq_len = seq_len
-
-        def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-            # Use the model's own forward which handles RoPE, attention, etc.
-            # Pass output_hidden_states to get the final hidden states without LM head
-            outputs = self.model(input_ids=input_ids)
-            return outputs.last_hidden_state
-
-    wrapper = TextEncoderWrapper(model, max_tokens).eval()
-
-    # Patch RMSNorm to avoid float32 upcast
-    _replace_modules_by_class(wrapper, "GemmaRMSNorm", lambda m: TraceFriendlyRMSNorm(m))
-    _replace_modules_by_class(wrapper, "Gemma2RMSNorm", lambda m: TraceFriendlyRMSNorm(m))
-
-    dummy_input = torch.randint(0, 1000, (1, max_tokens), dtype=torch.int32)
-    print(f"  Tracing with input shape {list(dummy_input.shape)}...")
-    t0 = time.time()
-
-    with torch.no_grad():
-        traced = torch.jit.trace(wrapper, dummy_input)
-    print(f"  Traced in {time.time() - t0:.1f}s")
-
-    if validate:
-        print("  Validating trace accuracy...")
-        with torch.no_grad():
-            ref_out = wrapper(dummy_input)
-            traced_out = traced(dummy_input)
-        max_err = (ref_out - traced_out).abs().max().item()
-        print(f"  Max error (original vs traced): {max_err:.6f}")
-
-    print("  Converting to CoreML mlprogram...")
-    t0 = time.time()
-
-    mlmodel = ct.convert(
-        traced,
-        inputs=[ct.TensorType(name="input_ids", shape=(1, max_tokens), dtype=np.int32)],
-        outputs=[ct.TensorType(name="hidden_states")],
-        convert_to="mlprogram",
-        compute_precision=ct.precision.FLOAT32,
-        minimum_deployment_target=ct.target.iOS17,
-        compute_units=ct.ComputeUnit.ALL,
-    )
-    print(f"  Converted in {time.time() - t0:.1f}s")
-
-    mlmodel.save(str(mlpackage_path))
-    print(f"  Saved to {mlpackage_path}")
-
-    if validate:
-        print("  Validating CoreML prediction...")
-        try:
-            pred = mlmodel.predict({"input_ids": dummy_input.numpy()})
-            coreml_out = pred["hidden_states"]
-            traced_np = traced(dummy_input).detach().numpy()
-            max_err = np.abs(coreml_out.astype(np.float32) - traced_np.astype(np.float32)).max()
-            print(f"  Max error (traced vs CoreML): {max_err:.6f}")
-        except Exception as e:
-            print(f"  CoreML validation skipped: {e}")
-
-    del model, wrapper, traced, mlmodel
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-    print(f"\n{'='*60}")
-    print(f"Text encoder CoreML conversion complete: {mlpackage_path}")
-    print(f"{'='*60}")
-
-
 # ──────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert Sana components to CoreML for ANE")
+    parser = argparse.ArgumentParser(description="Convert Sana VAE decoder to CoreML")
     parser.add_argument("--output", "-o", required=True, help="Output directory (e.g., ./weights/sana-0.6b)")
     parser.add_argument("--model-id", default="Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers",
-                        help="HuggingFace model ID for VAE")
-    parser.add_argument("--text-encoder-id", default="google/gemma-2-2b-it",
-                        help="HuggingFace model ID for text encoder")
+                        help="HuggingFace model ID")
     parser.add_argument("--latent-size", type=int, default=32,
                         help="Latent spatial size (32 for 1024px, 16 for 512px)")
     parser.add_argument("--latent-channels", type=int, default=32,
                         help="Number of latent channels")
-    parser.add_argument("--max-tokens", type=int, default=300,
-                        help="Max prompt tokens for text encoder")
     parser.add_argument("--validate", action="store_true",
                         help="Validate accuracy after conversion")
-    parser.add_argument("--skip-vae", action="store_true", help="Skip VAE decoder conversion")
-    parser.add_argument("--skip-transformer", action="store_true", help="Skip transformer denoiser conversion")
-    parser.add_argument("--skip-text-encoder", action="store_true", help="Skip text encoder conversion")
     args = parser.parse_args()
 
-    if not args.skip_vae:
-        convert_vae_decoder_to_coreml(
-            output_dir=args.output,
-            model_id=args.model_id,
-            latent_size=args.latent_size,
-            latent_channels=args.latent_channels,
-            validate=args.validate,
-        )
-
-    if not args.skip_transformer:
-        convert_transformer_to_coreml(
-            output_dir=args.output,
-            model_id=args.model_id,
-            latent_size=args.latent_size,
-            latent_channels=args.latent_channels,
-            max_tokens=args.max_tokens,
-            validate=args.validate,
-        )
-
-    if not args.skip_text_encoder:
-        try:
-            convert_text_encoder_to_coreml(
-                output_dir=args.output,
-                text_encoder_id=args.text_encoder_id,
-                max_tokens=args.max_tokens,
-                validate=args.validate,
-            )
-        except Exception as e:
-            print(f"\n  Text encoder CoreML conversion failed: {e}")
-            print("  Text encoder will run on CPU (fallback).")
+    convert_vae_decoder_to_coreml(
+        output_dir=args.output,
+        model_id=args.model_id,
+        latent_size=args.latent_size,
+        latent_channels=args.latent_channels,
+        validate=args.validate,
+    )
 
 
 if __name__ == "__main__":

@@ -130,40 +130,25 @@ size_t SanaModel::run_diffusion(const std::vector<__fp16>& prompt_embeds, std::v
         for (size_t j = 0; j < total; ++j) {
             lat_fp16[j] = static_cast<__fp16>(latents_f[j] * A);
         }
+        gb->set_input(lat_in_node_, lat_fp16.data(), Precision::FP16);
 
-        if (use_npu_transformer_ && npu_transformer_) {
-            // ANE path: predict_multi with raw scalar timestep/guidance
-            // CoreML model does its own sinusoidal embedding + caption projection internally
-            float ts_scalar = scm_t;
-            float guidance_scalar = kGuidanceScale;
-            std::unordered_map<std::string, npu::NPUEncoder::MultiInput> inputs;
-            inputs["hidden_states"] = {lat_fp16.data(), {1, static_cast<int>(latent_channels_), static_cast<int>(latents_h_), static_cast<int>(latents_w_)}, true};
-            inputs["encoder_hidden_states"] = {prompt_embeds.data(), {1, static_cast<int>(kMaxPromptTokens), static_cast<int>(text_encoder_dim_)}, true};
-            inputs["timestep"] = {&ts_scalar, {1}, false};
-            inputs["guidance"] = {&guidance_scalar, {1}, false};
+        // Timestep: embed scm_t (normalized [0,1]), NOT the raw angle
+        auto ts_emb = make_sinusoidal_embedding_fp16(scm_t, kTimestepDim);
+        gb->set_input(timestep_node_, ts_emb.data(), Precision::FP16);
 
-            npu_transformer_->predict_multi(inputs, npu_transformer_output_.data());
+        gb->execute();
 
-            for (size_t j = 0; j < total; ++j)
-                model_output_f[j] = static_cast<float>(npu_transformer_output_[j]);
+        // Retrieve raw model output
+        void* raw_ptr = gb->get_output(denoiser_output_node_);
+        const auto& raw_buf = gb->get_output_buffer(denoiser_output_node_);
+        if (raw_buf.precision == Precision::FP16) {
+            const __fp16* src = static_cast<const __fp16*>(raw_ptr);
+            for (size_t j = 0; j < total; ++j) model_output_f[j] = static_cast<float>(src[j]);
+        } else if (raw_buf.precision == Precision::FP32) {
+            const float* src = static_cast<const float*>(raw_ptr);
+            std::copy(src, src + total, model_output_f.begin());
         } else {
-            // CPU path
-            gb->set_input(lat_in_node_, lat_fp16.data(), Precision::FP16);
-            auto ts_emb = make_sinusoidal_embedding_fp16(scm_t, kTimestepDim);
-            gb->set_input(timestep_node_, ts_emb.data(), Precision::FP16);
-            gb->execute();
-
-            void* raw_ptr = gb->get_output(denoiser_output_node_);
-            const auto& raw_buf = gb->get_output_buffer(denoiser_output_node_);
-            if (raw_buf.precision == Precision::FP16) {
-                const __fp16* src = static_cast<const __fp16*>(raw_ptr);
-                for (size_t j = 0; j < total; ++j) model_output_f[j] = static_cast<float>(src[j]);
-            } else if (raw_buf.precision == Precision::FP32) {
-                const float* src = static_cast<const float*>(raw_ptr);
-                std::copy(src, src + total, model_output_f.begin());
-            } else {
-                throw std::runtime_error("Unexpected model output precision");
-            }
+            throw std::runtime_error("Unexpected model output precision");
         }
 
         // Post-process output and compute pred_x0 (unit-scale latent space)

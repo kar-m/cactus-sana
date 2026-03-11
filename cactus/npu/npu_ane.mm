@@ -1,4 +1,5 @@
 #include "npu_ane.h"
+#include <chrono>
 
 #if CACTUS_HAS_ANE
 
@@ -464,14 +465,20 @@ size_t ANEEncoder::predict_multi(
             NSUInteger totalElements = 1;
             for (NSNumber* d in shape) totalElements *= [d unsignedIntegerValue];
 
-            MLMultiArrayDataType dtype = mi.is_fp16 ? MLMultiArrayDataTypeFloat16 : MLMultiArrayDataTypeFloat32;
-            MLMultiArray* arr = [[MLMultiArray alloc] initWithShape:shape dataType:dtype error:&error];
+            MLMultiArrayDataType mlDtype;
+            size_t elemSize;
+            switch (mi.dtype) {
+                case NPUEncoder::DataType::FP16:  mlDtype = MLMultiArrayDataTypeFloat16; elemSize = sizeof(__fp16); break;
+                case NPUEncoder::DataType::FP32:  mlDtype = MLMultiArrayDataTypeFloat32; elemSize = sizeof(float); break;
+                case NPUEncoder::DataType::INT32: mlDtype = MLMultiArrayDataTypeInt32; elemSize = sizeof(int32_t); break;
+            }
+            MLMultiArray* arr = [[MLMultiArray alloc] initWithShape:shape dataType:mlDtype error:&error];
             if (error) {
                 CACTUS_LOG_ERROR("npu", "predict_multi: failed to create array for " << name);
                 return 0;
             }
 
-            size_t bytes = totalElements * (mi.is_fp16 ? sizeof(__fp16) : sizeof(float));
+            size_t bytes = totalElements * elemSize;
             memcpy(arr.dataPointer, mi.data, bytes);
 
             NSString* nsName = [NSString stringWithUTF8String:name.c_str()];
@@ -485,7 +492,11 @@ size_t ANEEncoder::predict_multi(
             return 0;
         }
 
+        auto pred_start = std::chrono::steady_clock::now();
         id<MLFeatureProvider> outputProvider = [impl.model predictionFromFeatures:inputProvider error:&error];
+        auto pred_end = std::chrono::steady_clock::now();
+        auto pred_ms = std::chrono::duration_cast<std::chrono::milliseconds>(pred_end - pred_start).count();
+        CACTUS_LOG_INFO("npu", "predict_multi: prediction took " << pred_ms << "ms");
         if (error) {
             CACTUS_LOG_ERROR("npu", "predict_multi: prediction failed: " << [[error localizedDescription] UTF8String]);
             return 0;
