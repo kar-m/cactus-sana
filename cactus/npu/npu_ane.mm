@@ -381,9 +381,21 @@ size_t ANEEncoder::encode(const __fp16* input,
 
         if (mlOutput) {
             size_t count = mlOutput.count;
-            __fp16* outputPtr = (__fp16*)mlOutput.dataPointer;
-            if (output != outputPtr) {
-                memcpy(output, outputPtr, count * sizeof(__fp16));
+            if (mlOutput.dataType == MLMultiArrayDataTypeFloat16) {
+                __fp16* outputPtr = (__fp16*)mlOutput.dataPointer;
+                if (output != outputPtr) {
+                    memcpy(output, outputPtr, count * sizeof(__fp16));
+                }
+            } else if (mlOutput.dataType == MLMultiArrayDataTypeFloat32) {
+                float* outputPtr = (float*)mlOutput.dataPointer;
+                for (size_t i = 0; i < count; i++) {
+                    output[i] = (__fp16)outputPtr[i];
+                }
+            } else {
+                __fp16* outputPtr = (__fp16*)mlOutput.dataPointer;
+                if (output != outputPtr) {
+                    memcpy(output, outputPtr, count * sizeof(__fp16));
+                }
             }
             return count;
         }

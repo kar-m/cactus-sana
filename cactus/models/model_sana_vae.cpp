@@ -80,11 +80,6 @@ std::vector<__fp16> SanaModel::make_image_conditioned_latents(const std::string&
 }
 
 size_t SanaModel::decode_latents(const std::vector<__fp16>& final_latents) {
-    auto* decoder = static_cast<CactusGraph*>(decoder_graph_handle_);
-    if (!decoder) {
-        throw std::runtime_error("Sana decoder graph is not initialized.");
-    }
-
     // Unscale latents: denoiser works in scaled space (x kScalingFactor), DC-AE decoder expects unscaled
     const size_t n = final_latents.size();
     std::vector<__fp16> unscaled(n);
@@ -97,6 +92,34 @@ size_t SanaModel::decode_latents(const std::vector<__fp16>& final_latents) {
             f.write(reinterpret_cast<const char*>(unscaled.data()), n * sizeof(__fp16));
             std::cout << "[Sana] Dumped " << n << " fp16 latents to " << dump_path << std::endl;
         }
+    }
+
+    // ANE fast path: use CoreML VAE decoder if available and latent shape matches
+    if (use_npu_vae_decoder_ && npu_vae_decoder_ && npu_vae_decoder_->is_available()) {
+        auto expected_shape = npu_vae_decoder_->get_input_shape();
+        bool shape_match = expected_shape.size() == 4
+            && expected_shape[0] == 1
+            && expected_shape[1] == static_cast<int>(latent_channels_)
+            && expected_shape[2] == static_cast<int>(latents_h_)
+            && expected_shape[3] == static_cast<int>(latents_w_);
+
+        if (shape_match) {
+            std::cout << "[Sana] Decoding latents with ANE..." << std::flush;
+            npu_vae_decoder_->encode(
+                unscaled.data(),
+                npu_vae_output_.data(),
+                {1, static_cast<int>(latent_channels_), static_cast<int>(latents_h_), static_cast<int>(latents_w_)},
+                "latents", "rgb"
+            );
+            std::cout << " done." << std::endl;
+            return kDecoderNodeFlag | decoder_output_node_;
+        }
+    }
+
+    // CPU fallback
+    auto* decoder = static_cast<CactusGraph*>(decoder_graph_handle_);
+    if (!decoder) {
+        throw std::runtime_error("Sana decoder graph is not initialized.");
     }
     std::cout << "[Sana] Decoding latents with DCAE..." << std::flush;
     decoder->set_input(decoder_latents_node_, unscaled.data(), Precision::FP16);

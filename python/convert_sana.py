@@ -63,7 +63,7 @@ def load_diffusers_component(model_cls, model_id, subfolder, variant: Optional[s
     attempts = [a for a in attempts if not (a in seen or seen.add(a))]
     last_error = None
     for candidate in attempts:
-        kwargs = dict(subfolder=subfolder, torch_dtype=torch.float32)
+        kwargs = dict(subfolder=subfolder, torch_dtype=torch.float16)
         if candidate is not None:
             kwargs["variant"] = candidate
         try:
@@ -95,7 +95,7 @@ def convert_text_encoder(output_dir, precision="INT8", model_id="google/gemma-2-
     from transformers import AutoModelForCausalLM, AutoTokenizer
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
 
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float32, token=hf_token)
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, token=hf_token)
     
     te_dir = Path(output_dir) / "text_encoder"
     te_dir.mkdir(parents=True, exist_ok=True)

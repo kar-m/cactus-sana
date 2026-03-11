@@ -259,6 +259,26 @@ bool SanaModel::init(const std::string& model_folder, size_t context_size, const
         }
     }
 
+    // Try to load CoreML VAE decoder for ANE acceleration
+    std::string mlpackage_path = model_folder + "/vae_decoder.mlpackage";
+    if (npu::is_npu_available()) {
+        npu_vae_decoder_ = npu::create_encoder();
+        if (npu_vae_decoder_ && npu_vae_decoder_->load(mlpackage_path)) {
+            use_npu_vae_decoder_ = true;
+            npu_vae_decoder_->preallocate(
+                {1, static_cast<int>(latent_channels_), static_cast<int>(latents_h_), static_cast<int>(latents_w_)},
+                "latents", "rgb"
+            );
+            size_t image_h = latents_h_ * 32;
+            size_t image_w = latents_w_ * 32;
+            npu_vae_output_.resize(3 * image_h * image_w);
+            std::cout << "[Sana] ANE VAE decoder loaded from " << mlpackage_path << std::endl;
+        } else {
+            use_npu_vae_decoder_ = false;
+            npu_vae_decoder_.reset();
+        }
+    }
+
     initialized_ = true;
 
     if (!has_guidance_embeds_) {
@@ -447,6 +467,11 @@ size_t SanaModel::generate_image_to_image(const std::string& prompt, const std::
 
 void* SanaModel::get_output_pointer(size_t encoded_node_id) const {
     if ((encoded_node_id & kDecoderNodeFlag) != 0) {
+        // ANE path: return the pre-allocated output buffer
+        if (use_npu_vae_decoder_ && !npu_vae_output_.empty()) {
+            return const_cast<void*>(static_cast<const void*>(npu_vae_output_.data()));
+        }
+        // CPU path: return graph output
         auto* decoder = static_cast<CactusGraph*>(decoder_graph_handle_);
         if (!decoder) {
             return nullptr;

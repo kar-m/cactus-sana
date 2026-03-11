@@ -1,6 +1,7 @@
 #pragma once
 
 #include "model.h"
+#include "../npu/npu.h"
 
 namespace cactus {
 namespace engine {
@@ -63,6 +64,10 @@ private:
     size_t encoder_image_node_ = 0;
     size_t encoder_latents_node_ = 0;
     bool has_vae_encoder_ = false;
+
+    std::unique_ptr<npu::NPUEncoder> npu_vae_decoder_;
+    bool use_npu_vae_decoder_ = false;
+    std::vector<__fp16> npu_vae_output_;
 
     size_t text_encoder_dim_ = 2304;
     size_t chi_token_count_ = 0;  // precomputed: encode(kChiPrompt).size() (no BOS) = tail_start for token selection

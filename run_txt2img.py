@@ -7,7 +7,7 @@ sys.path.append('python/src')
 import cactus
 
 MODEL = "./weights/sana-0.6b"
-SIZE  = 1024
+SIZE  = 512
 OUT   = "results"
 
 os.makedirs(OUT, exist_ok=True)
