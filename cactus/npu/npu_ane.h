@@ -48,6 +48,11 @@ public:
 
     size_t get_output_buffer_size() const override;
 
+    size_t predict_multi(
+        const std::unordered_map<std::string, MultiInput>& inputs,
+        __fp16* output,
+        const std::string& output_name = "") override;
+
 private:
     void* impl_;
 };

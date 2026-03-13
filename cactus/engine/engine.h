@@ -50,6 +50,10 @@ struct Config {
     uint32_t attention_heads = 16;
     uint32_t attention_kv_heads = 8;
     uint32_t attention_head_dim = 128;
+    uint32_t num_cross_attention_heads = 0;
+    uint32_t cross_attention_head_dim = 0;
+    uint32_t cross_attention_dim = 0;
+    uint32_t caption_channels = 0;
     float layer_norm_eps = 1e-6f;
     float rope_theta = 1000000.0f;
     uint32_t num_experts = 0;
@@ -63,6 +67,10 @@ struct Config {
     bool use_expert_bias = false;
     float routed_scaling_factor = 1.0f;
     bool tie_word_embeddings = true;
+
+    uint32_t gemma_version = 3;
+    bool use_qk_norm = true;
+    float attn_logit_softcapping = 0.0f;
 
     uint32_t vision_hidden_dim = 0;
     uint32_t vision_num_layers = 0;
@@ -100,7 +108,7 @@ struct Config {
     uint32_t num_decoder_layers = 0;
     float partial_rotary_factor = 0.0f;
 
-    enum class ModelType {QWEN = 0, GEMMA = 1, NOMIC = 3, LFM2 = 5, SIGLIP2 = 6, WHISPER = 7, MOONSHINE = 8, SILERO_VAD = 9};
+    enum class ModelType {QWEN = 0, GEMMA = 1, NOMIC = 3, LFM2 = 5, SIGLIP2 = 6, WHISPER = 7, MOONSHINE = 8, SILERO_VAD = 9, SANA = 10};
     ModelType model_type = ModelType::QWEN;
 
     enum class ModelVariant {DEFAULT = 0, VLM = 1, EXTRACT = 2, RAG = 3};
@@ -516,6 +524,22 @@ public:
     virtual uint32_t decode_with_audio(const std::vector<uint32_t>& tokens, const std::vector<float>& audio_features, float temperature = 0.0f, float top_p = 0.0f,
                       size_t top_k = 0, const std::string& profile_file = "", float* out_entropy = nullptr);
 
+    virtual size_t generate_image(const std::string& prompt, size_t width = 1024, size_t height = 1024) {
+        (void)prompt;
+        (void)width;
+        (void)height;
+        return 0;
+    }
+    virtual size_t generate_image_to_image(const std::string& prompt, const std::string& init_image_path,
+                                           size_t width = 1024, size_t height = 1024, float strength = 0.6f) {
+        (void)prompt;
+        (void)init_image_path;
+        (void)width;
+        (void)height;
+        (void)strength;
+        return 0;
+    }
+
     std::vector<float> get_embeddings(const std::vector<uint32_t>& tokens, bool pooled = true, bool normalize = false, const std::string& profile_file = "");
     
     virtual std::vector<float> get_image_embeddings(const std::string& image_path);
@@ -539,12 +563,10 @@ public:
     void update_tool_constraints(uint32_t token_id);
 
     void* graph_handle_;
+    virtual size_t forward(const std::vector<uint32_t>& tokens, bool use_cache = false) = 0;
+    virtual size_t forward(const std::vector<float>& audio_features, const std::vector<uint32_t>& tokens, bool use_cache = false);
 
 protected:
-    virtual size_t forward(const std::vector<uint32_t>& tokens, bool use_cache = false) = 0;
-    
-    virtual size_t forward(const std::vector<float>& audio_features, const std::vector<uint32_t>& tokens, bool use_cache = false);
-    
     virtual void load_weights_to_graph(CactusGraph* gb) = 0;
     
     virtual size_t build_attention(CactusGraph* gb, size_t normalized_input, uint32_t layer_idx,

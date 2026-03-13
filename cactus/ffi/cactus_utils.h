@@ -66,6 +66,10 @@ struct CactusModelHandle {
     size_t corpus_embedding_dim = 0;
     std::vector<std::vector<float>> tool_embeddings;
     std::vector<std::string> tool_texts;
+    // Last generated image pixels (RGB uint8, row-major HWC)
+    std::vector<uint8_t> last_image_pixels;
+    size_t last_image_width = 0;
+    size_t last_image_height = 0;
 
     CactusModelHandle() : should_stop(false) {}
 };

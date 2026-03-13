@@ -472,6 +472,94 @@ Java_com_cactus_Cactus_nativeVad(JNIEnv* env, jobject, jlong handle,
     return env->NewStringUTF(buffer.data());
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_cactus_Cactus_nativeGenerateImage(JNIEnv* env, jobject, jlong handle,
+                                            jstring prompt, jint width, jint height) {
+    if (handle == 0) {
+        return env->NewStringUTF("{\"error\":\"Model not initialized\"}");
+    }
+
+    const char* promptStr = jstring_to_cstr(env, prompt);
+    std::vector<char> buffer(DEFAULT_BUFFER_SIZE);
+
+    int result = cactus_generate_image(
+        reinterpret_cast<cactus_model_t>(handle),
+        promptStr,
+        static_cast<size_t>(width),
+        static_cast<size_t>(height),
+        buffer.data(),
+        buffer.size()
+    );
+
+    release_jstring(env, prompt, promptStr);
+
+    if (result < 0) {
+        const char* error = cactus_get_last_error();
+        std::string errorJson = "{\"error\":\"" + std::string(error ? error : "Unknown error") + "\"}";
+        return env->NewStringUTF(errorJson.c_str());
+    }
+
+    return env->NewStringUTF(buffer.data());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_cactus_Cactus_nativeGenerateImageToImage(JNIEnv* env, jobject, jlong handle,
+                                                   jstring prompt, jstring initImagePath,
+                                                   jint width, jint height, jfloat strength) {
+    if (handle == 0) {
+        return env->NewStringUTF("{\"error\":\"Model not initialized\"}");
+    }
+
+    const char* promptStr = jstring_to_cstr(env, prompt);
+    const char* imagePath = jstring_to_cstr(env, initImagePath);
+    std::vector<char> buffer(DEFAULT_BUFFER_SIZE);
+
+    int result = cactus_generate_image_to_image(
+        reinterpret_cast<cactus_model_t>(handle),
+        promptStr,
+        imagePath,
+        static_cast<size_t>(width),
+        static_cast<size_t>(height),
+        static_cast<float>(strength),
+        buffer.data(),
+        buffer.size()
+    );
+
+    release_jstring(env, prompt, promptStr);
+    release_jstring(env, initImagePath, imagePath);
+
+    if (result < 0) {
+        const char* error = cactus_get_last_error();
+        std::string errorJson = "{\"error\":\"" + std::string(error ? error : "Unknown error") + "\"}";
+        return env->NewStringUTF(errorJson.c_str());
+    }
+
+    return env->NewStringUTF(buffer.data());
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_cactus_Cactus_nativeGetLastImagePixels(JNIEnv* env, jobject, jlong handle) {
+    if (handle == 0) return nullptr;
+
+    auto model = reinterpret_cast<cactus_model_t>(handle);
+    size_t out_width = 0, out_height = 0;
+
+    // Query required size (pass null buffer)
+    int needed = cactus_get_last_image_pixels_rgb(model, nullptr, 0, &out_width, &out_height);
+    if (needed < 0 || out_width == 0 || out_height == 0) return nullptr;
+
+    std::vector<uint8_t> buffer(static_cast<size_t>(needed));
+    int bytes = cactus_get_last_image_pixels_rgb(
+        model, buffer.data(), buffer.size(), &out_width, &out_height);
+    if (bytes < 0) return nullptr;
+
+    jbyteArray arr = env->NewByteArray(static_cast<jsize>(bytes));
+    if (!arr) return nullptr;
+    env->SetByteArrayRegion(arr, 0, static_cast<jsize>(bytes),
+                            reinterpret_cast<const jbyte*>(buffer.data()));
+    return arr;
+}
+
 JNIEXPORT jlong JNICALL
 Java_com_cactus_CactusIndex_nativeIndexInit(JNIEnv* env, jobject, jstring indexDir, jint embeddingDim) {
     const char* dir = jstring_to_cstr(env, indexDir);

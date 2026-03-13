@@ -26,6 +26,19 @@ public:
                           const std::string& input_name = "x",
                           const std::string& output_name = "") = 0;
 
+    enum class DataType { FP16, FP32, INT32 };
+
+    struct MultiInput {
+        const void* data;
+        std::vector<int> shape;
+        DataType dtype;
+    };
+
+    virtual size_t predict_multi(
+        const std::unordered_map<std::string, MultiInput>& inputs,
+        __fp16* output,
+        const std::string& output_name = "") { (void)inputs; (void)output; (void)output_name; return 0; }
+
     virtual bool is_available() const = 0;
 
     virtual std::vector<int> get_input_shape() const = 0;

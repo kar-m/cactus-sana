@@ -1,5 +1,6 @@
 #include "engine.h"
 #include "../models/model.h"
+#include "../models/model_sana.h"
 #include "../graph/graph.h"
 #include "../npu/npu.h"
 #include <fstream>
@@ -425,6 +426,10 @@ bool Config::from_json(const std::string& config_path) {
         else if (key == "attention_heads") attention_heads = static_cast<uint32_t>(std::stoul(value));
         else if (key == "attention_kv_heads") attention_kv_heads = static_cast<uint32_t>(std::stoul(value));
         else if (key == "attention_head_dim") attention_head_dim = static_cast<uint32_t>(std::stoul(value));
+        else if (key == "num_cross_attention_heads") num_cross_attention_heads = static_cast<uint32_t>(std::stoul(value));
+        else if (key == "cross_attention_head_dim") cross_attention_head_dim = static_cast<uint32_t>(std::stoul(value));
+        else if (key == "cross_attention_dim") cross_attention_dim = static_cast<uint32_t>(std::stoul(value));
+        else if (key == "caption_channels") caption_channels = static_cast<uint32_t>(std::stoul(value));
         else if (key == "layer_norm_eps") layer_norm_eps = std::stof(value);
         else if (key == "rope_theta") rope_theta = std::stof(value);
         else if (key == "num_experts") num_experts = static_cast<uint32_t>(std::stoul(value));
@@ -438,6 +443,9 @@ bool Config::from_json(const std::string& config_path) {
         else if (key == "use_expert_bias") use_expert_bias = (value == "true" || value == "1");
         else if (key == "routed_scaling_factor") routed_scaling_factor = std::stof(value);
         else if (key == "tie_word_embeddings") tie_word_embeddings = (value == "true" || value == "1");
+        else if (key == "gemma_version") gemma_version = static_cast<uint32_t>(std::stoul(value));
+        else if (key == "use_qk_norm") use_qk_norm = (value == "true" || value == "1");
+        else if (key == "attn_logit_softcapping") attn_logit_softcapping = std::stof(value);
         else if (key == "vision_hidden_dim") vision_hidden_dim = static_cast<uint32_t>(std::stoul(value));
         else if (key == "vision_num_layers") vision_num_layers = static_cast<uint32_t>(std::stoul(value));
         else if (key == "vision_attention_heads") vision_attention_heads = static_cast<uint32_t>(std::stoul(value));
@@ -477,6 +485,7 @@ bool Config::from_json(const std::string& config_path) {
             else if (value == "whisper" || value == "WHISPER") model_type = ModelType::WHISPER;
             else if (value == "moonshine" || value == "MOONSHINE") model_type = ModelType::MOONSHINE;
             else if (value == "silero_vad" || value == "SILERO_VAD") model_type = ModelType::SILERO_VAD;
+            else if (value == "sana" || value == "SANA") model_type = ModelType::SANA;
             else model_type = ModelType::QWEN;
         }
         else if (key == "model_variant") {
@@ -590,6 +599,8 @@ std::unique_ptr<Model> create_model(const std::string& model_folder) {
             return std::make_unique<MoonshineModel>(config);
         case Config::ModelType::SILERO_VAD:
             return std::make_unique<SileroVADModel>(config);
+        case Config::ModelType::SANA:
+            return std::make_unique<SanaModel>(config);
         default:
             return std::make_unique<QwenModel>(config);
     }

@@ -171,6 +171,27 @@ void cactus_conv1d_f16(
     size_t stride
 );
 
+void cactus_conv2d_f16(
+    const __fp16* input,
+    const __fp16* weight,
+    const __fp16* bias,
+    __fp16* output,
+    size_t N,
+    size_t H,
+    size_t W,
+    size_t C_in,
+    size_t C_out,
+    size_t KH,
+    size_t KW,
+    size_t stride_h,
+    size_t stride_w,
+    size_t padding_h,
+    size_t padding_w,
+    size_t dilation_h,
+    size_t dilation_w,
+    size_t groups
+);
+
 void cactus_stft_f16(
     const __fp16* input,
     const __fp16* weight,

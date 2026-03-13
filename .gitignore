@@ -30,3 +30,17 @@ tmp
 
 ruy
 notes.txt
+results/
+node_modules
+
+# React Native SDK
+react-native/node_modules/
+react-native/.yarn/cache/
+react-native/.yarn/install-state.gz
+react-native/lib/
+react-native/example/ios/build/
+react-native/example/ios/Pods/
+react-native/example/android/build/
+react-native/example/android/app/build/
+react-native/ios/cactus.xcframework/
+react-native/android/src/main/jniLibs/

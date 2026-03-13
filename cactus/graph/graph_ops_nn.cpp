@@ -533,10 +533,98 @@ void compute_attention_node(GraphNode& node, const std::vector<std::unique_ptr<G
     size_t num_kv_heads = k_shape[2];
     size_t kv_seq_len = key_buffer.shape[1];
 
+    // Optional 4th input: attention mask [seq_len * kv_seq_len], 0 = ignore position, non-zero = keep
+    const __fp16* mask_ptr = nullptr;
+    if (node.input_ids.size() >= 4) {
+        const auto& mask_buf = nodes[node_index_map.at(node.input_ids[3])]->output_buffer;
+        mask_ptr = mask_buf.data_as<__fp16>();
+    }
     cactus_attention_f16(query_buffer.data_as<__fp16>(), key_buffer.data_as<__fp16>(),
                          value_buffer.data_as<__fp16>(), node.output_buffer.data_as<__fp16>(),
-                         batch_size, seq_len, kv_seq_len, num_q_heads, num_kv_heads, head_dim, node.params.scale, nullptr,
+                         batch_size, seq_len, kv_seq_len, num_q_heads, num_kv_heads, head_dim, node.params.scale, mask_ptr,
                          node.params.position_offset, node.params.window_size, node.params.is_causal);
+}
+
+void compute_linear_attention_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map) {
+    if (node.input_ids.size() < 3) {
+        throw std::runtime_error("Linear Attention requires 3 inputs (Q, K, V)");
+    }
+
+    const auto& q_buf = nodes[node_index_map.at(node.input_ids[0])]->output_buffer;
+    const auto& k_buf = nodes[node_index_map.at(node.input_ids[1])]->output_buffer;
+    const auto& v_buf = nodes[node_index_map.at(node.input_ids[2])]->output_buffer;
+    
+    if (q_buf.precision != Precision::FP16) {
+        throw std::runtime_error("Linear Attention only supports FP16 precision");
+    }
+    
+    // Q, K, V shape: [batch, heads, seq, dim]
+    const auto& shape = q_buf.shape;
+    size_t batch_size = shape[0];
+    size_t num_heads = shape[1];
+    size_t seq_len = shape[2];
+    size_t head_dim = shape[3];
+    
+    const __fp16* q_ptr = q_buf.data_as<__fp16>();
+    const __fp16* k_ptr = k_buf.data_as<__fp16>();
+    const __fp16* v_ptr = v_buf.data_as<__fp16>();
+    __fp16* out_ptr = node.output_buffer.data_as<__fp16>();
+    
+    float scale = node.params.scale;
+
+    // EfficientViT linear attention (matches HF SanaMultiscaleAttnProcessor2_0.apply_linear_attention):
+    // Equivalent formula: out = Q @ (K^T V) / (Q @ k_sum + eps)
+    // where k_sum[d] = sum_l relu(K[l, d])
+    // Q and K have ReLU applied here (matching HF's nonlinearity applied before attention).
+
+    for (size_t b = 0; b < batch_size; ++b) {
+        for (size_t h = 0; h < num_heads; ++h) {
+            size_t head_offset = (b * num_heads + h) * seq_len * head_dim;
+
+            // 1. Compute K^T * V (dim x dim matrix) and k_sum (using float for speed)
+            std::vector<float> kv_matrix(head_dim * head_dim, 0.0f);
+            std::vector<float> k_sum(head_dim, 0.0f);
+
+            for (size_t l = 0; l < seq_len; ++l) {
+                size_t token_offset = head_offset + l * head_dim;
+                for (size_t d1 = 0; d1 < head_dim; ++d1) {
+                    float k_val = static_cast<float>(k_ptr[token_offset + d1]);
+                    if (k_val < 0.0f) k_val = 0.0f; // ReLU
+                    k_sum[d1] += k_val;
+
+                    float* kv_row = &kv_matrix[d1 * head_dim];
+                    for (size_t d2 = 0; d2 < head_dim; ++d2) {
+                        kv_row[d2] += k_val * static_cast<float>(v_ptr[token_offset + d2]);
+                    }
+                }
+            }
+
+            // 2. Compute Q * (K^T * V) normalized
+            std::vector<float> q_vals(head_dim);
+            for (size_t l = 0; l < seq_len; ++l) {
+                size_t token_offset = head_offset + l * head_dim;
+
+                float denom_val = 1e-15f;
+                for (size_t d1 = 0; d1 < head_dim; ++d1) {
+                    float q_val = static_cast<float>(q_ptr[token_offset + d1]);
+                    if (q_val < 0.0f) q_val = 0.0f; // ReLU
+                    q_vals[d1] = q_val;
+                    denom_val += q_val * k_sum[d1];
+                }
+
+                float inv_denom = 1.0f / denom_val;
+                for (size_t d2 = 0; d2 < head_dim; ++d2) {
+                    float out_val = 0.0f;
+                    for (size_t d1 = 0; d1 < head_dim; ++d1) {
+                        out_val += q_vals[d1] * kv_matrix[d1 * head_dim + d2];
+                    }
+                    float final_val = out_val * inv_denom;
+                    final_val = std::max(-65504.0f, std::min(65504.0f, final_val));
+                    out_ptr[token_offset + d2] = static_cast<__fp16>(final_val);
+                }
+            }
+        }
+    }
 }
 
 void compute_attention_int8_hybrid_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map) {
@@ -575,7 +663,7 @@ void compute_attention_int8_hybrid_node(GraphNode& node, const std::vector<std::
 
 void compute_layernorm_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map) {
     const auto& input_buffer = nodes[node_index_map.at(node.input_ids[0])]->output_buffer;
-    const auto& weight_buffer = nodes[node_index_map.at(node.input_ids[1])]->output_buffer;
+    bool has_weight = node.input_ids.size() > 1;
     bool has_bias = node.input_ids.size() > 2;
     float epsilon = node.params.epsilon;
 
@@ -587,7 +675,7 @@ void compute_layernorm_node(GraphNode& node, const std::vector<std::unique_ptr<G
     size_t batch_size = input_buffer.total_size / feature_size;
 
     std::vector<float> input_float(input_buffer.total_size);
-    std::vector<float> weight_float(feature_size);
+    std::vector<float> weight_float(feature_size, 1.0f);
     std::vector<float> bias_float(feature_size, 0.0f);
 
     if (input_buffer.precision == Precision::INT8) {
@@ -598,18 +686,23 @@ void compute_layernorm_node(GraphNode& node, const std::vector<std::unique_ptr<G
             input_float[i] = static_cast<float>(input_fp16[i]);
         }
     } else {
-        std::memcpy(input_float.data(), input_buffer.data_as<float>(), input_buffer.total_size * sizeof(float));
+        const float* input_f32 = input_buffer.data_as<float>();
+        std::copy(input_f32, input_f32 + input_buffer.total_size, input_float.begin());
     }
 
-    if (weight_buffer.precision == Precision::INT8) {
-        throw std::runtime_error("LayerNorm currently does not support INT8 weight");
-    } else if (weight_buffer.precision == Precision::FP16) {
-        const __fp16* weight_fp16 = weight_buffer.data_as<__fp16>();
-        for (size_t i = 0; i < feature_size; ++i) {
-            weight_float[i] = static_cast<float>(weight_fp16[i]);
+    if (has_weight) {
+        const auto& weight_buffer = nodes[node_index_map.at(node.input_ids[1])]->output_buffer;
+        if (weight_buffer.precision == Precision::INT8) {
+            throw std::runtime_error("LayerNorm currently does not support INT8 weight");
+        } else if (weight_buffer.precision == Precision::FP16) {
+            const __fp16* weight_fp16 = weight_buffer.data_as<__fp16>();
+            for (size_t i = 0; i < feature_size; ++i) {
+                weight_float[i] = static_cast<float>(weight_fp16[i]);
+            }
+        } else {
+            const float* weight_f32 = weight_buffer.data_as<float>();
+            std::copy(weight_f32, weight_f32 + feature_size, weight_float.begin());
         }
-    } else {
-        std::memcpy(weight_float.data(), weight_buffer.data_as<float>(), feature_size * sizeof(float));
     }
 
     if (has_bias) {
@@ -622,7 +715,8 @@ void compute_layernorm_node(GraphNode& node, const std::vector<std::unique_ptr<G
                 bias_float[i] = static_cast<float>(bias_fp16[i]);
             }
         } else {
-            std::memcpy(bias_float.data(), bias_buffer.data_as<float>(), feature_size * sizeof(float));
+            const float* bias_f32 = bias_buffer.data_as<float>();
+            std::copy(bias_f32, bias_f32 + feature_size, bias_float.begin());
         }
     }
 
@@ -838,6 +932,40 @@ void compute_conv1d_node(GraphNode& node, const std::vector<std::unique_ptr<Grap
                       Y.data_as<__fp16>(), N, L, C_in, C_out, K, stride);
 }
 
+void compute_conv2d_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes,
+                         const std::unordered_map<size_t, size_t>& node_index_map) {
+    const auto& X = nodes[node_index_map.at(node.input_ids[0])]->output_buffer;
+    const auto& W = nodes[node_index_map.at(node.input_ids[1])]->output_buffer;
+
+    const __fp16* bias_ptr = (node.input_ids.size() > 2) ?
+        nodes[node_index_map.at(node.input_ids[2])]->output_buffer.data_as<__fp16>() : nullptr;
+
+    auto& Y = node.output_buffer;
+
+    const size_t N = X.shape[0];
+    const size_t C_in = X.shape[1];
+    const size_t H = X.shape[2];
+    const size_t W_in = X.shape[3];
+    const size_t C_out = W.shape[0];
+    const size_t KH = W.shape[2];
+    const size_t KW = W.shape[3];
+    const size_t stride_h = node.params.stride_h;
+    const size_t stride_w = node.params.stride_w;
+    const size_t padding_h = node.params.padding_h;
+    const size_t padding_w = node.params.padding_w;
+    const size_t dilation_h = node.params.dilation_h;
+    const size_t dilation_w = node.params.dilation_w;
+    const size_t groups = node.params.groups;
+
+    if (X.precision != Precision::FP16 || W.precision != Precision::FP16) {
+        throw std::runtime_error("Conv2d only supports FP16");
+    }
+
+    cactus_conv2d_f16(X.data_as<__fp16>(), W.data_as<__fp16>(), bias_ptr,
+                      Y.data_as<__fp16>(), N, H, W_in, C_in, C_out, KH, KW,
+                      stride_h, stride_w, padding_h, padding_w, dilation_h, dilation_w, groups);
+}
+
 void compute_stft_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes,
                                const std::unordered_map<size_t, size_t>& node_index_map) {
     const auto& X = nodes[node_index_map.at(node.input_ids[0])]->output_buffer;
@@ -858,6 +986,35 @@ void compute_stft_node(GraphNode& node, const std::vector<std::unique_ptr<GraphN
 
     cactus_stft_f16(X.data_as<__fp16>(), W.data_as<__fp16>(),
                             Y.data_as<__fp16>(), N, L, C_in, C_out, K, stride, num_fft_bins);
+}
+
+void compute_repeat_interleave_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map) {
+    const auto& X = nodes[node_index_map.at(node.input_ids[0])]->output_buffer;
+    auto& Y = node.output_buffer;
+    
+    int axis = node.params.axis;
+    size_t repeats = node.params.window_size;
+    
+    size_t outer_dim = 1;
+    for (int i = 0; i < axis; i++) outer_dim *= X.shape[i];
+    size_t axis_dim = X.shape[axis];
+    size_t inner_dim = 1;
+    for (size_t i = axis + 1; i < X.shape.size(); i++) inner_dim *= X.shape[i];
+    
+    if (X.precision != Precision::FP16) throw std::runtime_error("repeat_interleave only FP16");
+    
+    const __fp16* src = X.data_as<__fp16>();
+    __fp16* dst = Y.data_as<__fp16>();
+    
+    for (size_t o = 0; o < outer_dim; o++) {
+        for (size_t a = 0; a < axis_dim; a++) {
+            for (size_t r = 0; r < repeats; r++) {
+                size_t src_idx = (o * axis_dim + a) * inner_dim;
+                size_t dst_idx = (o * (axis_dim * repeats) + a * repeats + r) * inner_dim;
+                std::memcpy(dst + dst_idx, src + src_idx, inner_dim * sizeof(__fp16));
+            }
+        }
+    }
 }
 
 void compute_conv1d_k7s3_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes,

@@ -392,6 +392,11 @@ size_t CactusGraph::layernorm(size_t input, size_t weight, float epsilon) {
     return add_node(OpType::LAYERNORM, {input, weight}, {}, params);
 }
 
+size_t CactusGraph::layernorm(size_t input, float epsilon) {
+    OpParams params{.epsilon = epsilon};
+    return add_node(OpType::LAYERNORM, {input}, {}, params);
+}
+
 size_t CactusGraph::groupnorm(size_t input, size_t weight, size_t bias, size_t num_groups, float epsilon) {
     OpParams params{.epsilon = epsilon, .num_groups = num_groups};
     return add_node(OpType::GROUPNORM, {input, weight, bias}, {}, params);
@@ -410,6 +415,11 @@ size_t CactusGraph::attention(size_t query, size_t key, size_t value, float scal
 size_t CactusGraph::attention(size_t query, size_t key, size_t value, float scale, size_t position_offset, size_t window_size, ComputeBackend backend) {
     OpParams params{.scale = scale, .position_offset = position_offset, .window_size = window_size, .backend = backend};
     return add_node(OpType::ATTENTION, {query, key, value}, {}, params);
+}
+
+size_t CactusGraph::attention_with_mask(size_t query, size_t key, size_t value, float scale, size_t mask_node, ComputeBackend backend) {
+    OpParams params{.scale = scale, .is_causal = false, .backend = backend};
+    return add_node(OpType::ATTENTION, {query, key, value, mask_node}, {}, params);
 }
 
 size_t CactusGraph::attention_int8_hybrid(size_t query, size_t key_new, size_t value_new, float scale, size_t position_offset,
@@ -522,10 +532,79 @@ size_t CactusGraph::conv1d(size_t input, size_t weight, size_t bias, size_t stri
     return add_node(OpType::CONV1D, {input, weight, bias}, {N, C_out, L_out}, params);
 }
 
+size_t CactusGraph::repeat_interleave(size_t input, size_t repeats, int axis) {
+    auto in_shape = get_output_buffer(input).shape;
+    if (axis < 0) axis += in_shape.size();
+    
+    std::vector<size_t> out_shape = in_shape;
+    out_shape[axis] *= repeats;
+    
+    OpParams params;
+    params.axis = axis;
+    params.window_size = repeats;
+    return add_node(OpType::REPEAT_INTERLEAVE, {input}, out_shape, params);
+}
+
+size_t CactusGraph::conv2d(size_t input, size_t weight, size_t bias, size_t stride_h, size_t stride_w, size_t padding_h, size_t padding_w, size_t dilation_h, size_t dilation_w, size_t groups) {
+    const auto& xin = get_output_buffer(input);
+    const auto& w   = get_output_buffer(weight);
+    
+    if (xin.shape.size() != 4) throw std::runtime_error("conv2d expects N,C,H,W");
+    if (w.shape.size() != 4) throw std::runtime_error("conv2d weight expects [C_out, C_in_per_group, KH, KW]");
+    if (xin.shape[1] % groups != 0) throw std::runtime_error("C_in must be divisible by groups");
+    if (w.shape[0] % groups != 0) throw std::runtime_error("C_out must be divisible by groups");
+    if (w.shape[1] != xin.shape[1] / groups) throw std::runtime_error("C_in_per_group mismatch in conv2d");
+    
+    size_t N = xin.shape[0];
+    size_t C_out = w.shape[0];
+    size_t H = xin.shape[2];
+    size_t W = xin.shape[3];
+    size_t KH = w.shape[2];
+    size_t KW = w.shape[3];
+
+    size_t H_out = (H + 2 * padding_h - dilation_h * (KH - 1) - 1) / stride_h + 1;
+    size_t W_out = (W + 2 * padding_w - dilation_w * (KW - 1) - 1) / stride_w + 1;
+    
+    OpParams params{};
+    params.stride_h = stride_h;
+    params.stride_w = stride_w;
+    params.padding_h = padding_h;
+    params.padding_w = padding_w;
+    params.dilation_h = dilation_h;
+    params.dilation_w = dilation_w;
+    params.groups = groups;
+    
+    if (bias == 0) {
+        return add_node(OpType::CONV2D, {input, weight}, {N, C_out, H_out, W_out}, params);
+    } else {
+        return add_node(OpType::CONV2D, {input, weight, bias}, {N, C_out, H_out, W_out}, params);
+    }
+}
+
 size_t CactusGraph::lstm_cell(size_t input, size_t h_prev, size_t c_prev, size_t weight_ih, size_t weight_hh, size_t bias_ih, size_t bias_hh) {
     const auto& h_buffer = get_output_buffer(h_prev);
     std::vector<size_t> output_shape = {h_buffer.shape[0], h_buffer.shape[1], 2};
     return add_node(OpType::LSTM_CELL, {input, h_prev, c_prev, weight_ih, weight_hh, bias_ih, bias_hh}, output_shape, {});
+}
+
+size_t CactusGraph::linear_attention(size_t query, size_t key, size_t value, float scale, ComputeBackend backend) {
+    const auto& q_buffer = get_output_buffer(query);
+    const auto& k_buffer = get_output_buffer(key);
+    const auto& v_buffer = get_output_buffer(value);
+
+    ValidationUtils::validate_tensor_dims(q_buffer.shape, 4, "LINEAR_ATTENTION");
+    ValidationUtils::validate_tensor_dims(k_buffer.shape, 4, "LINEAR_ATTENTION");
+    ValidationUtils::validate_tensor_dims(v_buffer.shape, 4, "LINEAR_ATTENTION");
+
+    if (q_buffer.shape != k_buffer.shape || q_buffer.shape != v_buffer.shape) {
+        throw std::runtime_error("Linear Attention requires matching shapes for Q, K, V");
+    }
+
+    OpParams params;
+    params.scale = scale;
+    params.backend = backend;
+    
+    return add_node(OpType::LINEAR_ATTENTION, {query, key, value}, q_buffer.shape, params);
 }
 
 size_t CactusGraph::stft(size_t input, size_t weight, size_t stride, size_t num_fft_bins) {

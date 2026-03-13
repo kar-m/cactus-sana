@@ -32,11 +32,13 @@ extern void compute_conv1d_causal_node(GraphNode& node, const std::vector<std::u
 extern void compute_conv1d_k3_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
 extern void compute_conv1d_k7s3_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
 extern void compute_conv1d_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
+extern void compute_conv2d_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
 extern void compute_groupnorm_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
 extern void compute_rope_gptj_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
 extern void shrink_thread_local_buffers();
 extern void compute_lstm_cell_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
 extern void compute_stft_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
+extern void compute_repeat_interleave_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
 
 extern void compute_transpose_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
 extern void compute_gather_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
@@ -59,7 +61,7 @@ static const char* op_type_names[] = {
     "MATMUL", "TRANSPOSE", "RESHAPE", "SLICE", "GATHER", "EMBEDDING",
     "BILINEAR_INTERPOLATION",
     "SUM", "MEAN", "VARIANCE", "MIN", "MAX",
-    "RMS_NORM", "ROPE", "ROPE_GPTJ", "SOFTMAX", "ATTENTION", "ATTENTION_INT8_HYBRID", "CONV1D_CAUSAL", "CONV1D_K3", "CONV1D_K7S3", "CONV1D",
+    "RMS_NORM", "ROPE", "ROPE_GPTJ", "SOFTMAX", "ATTENTION", "ATTENTION_INT8_HYBRID", "LINEAR_ATTENTION", "CONV1D_CAUSAL", "CONV1D_K3", "CONV1D_K7S3", "CONV1D", "CONV2D",
     "SCALAR_ADD", "SCALAR_SUBTRACT", "SCALAR_MULTIPLY", "SCALAR_DIVIDE",
     "SCALAR_EXP", "SCALAR_SQRT", "SCALAR_COS", "SCALAR_SIN", "SCALAR_LOG",
     "RELU", "SILU", "GELU", "GELU_ERF", "SIGMOID", "TANH",
@@ -67,7 +69,7 @@ static const char* op_type_names[] = {
     "SCATTER_TOPK",
     "TOPK", "LAYERNORM", "GROUPNORM",
     "MOE_LAYER",
-    "INDEX",
+    "INDEX", "REPEAT_INTERLEAVE",
     "PERSISTENT",
     "QUANTIZE_ACTIVATIONS",
     "LSTM_CELL",
@@ -156,6 +158,11 @@ void compute_node_optimized(GraphNode& node, const std::vector<std::unique_ptr<G
             compute_attention_int8_hybrid_node(node, nodes, node_index_map);
             break;
 
+        case OpType::LINEAR_ATTENTION:
+            extern void compute_linear_attention_node(GraphNode& node, const std::vector<std::unique_ptr<GraphNode>>& nodes, const std::unordered_map<size_t, size_t>& node_index_map);
+            compute_linear_attention_node(node, nodes, node_index_map);
+            break;
+
         case OpType::LAYERNORM:
             compute_layernorm_node(node, nodes, node_index_map);
             break;
@@ -184,6 +191,10 @@ void compute_node_optimized(GraphNode& node, const std::vector<std::unique_ptr<G
             compute_conv1d_node(node, nodes, node_index_map);
             break;
 
+        case OpType::CONV2D:
+            compute_conv2d_node(node, nodes, node_index_map);
+            break;
+
         case OpType::TRANSPOSE:
             compute_transpose_node(node, nodes, node_index_map);
             break;
@@ -206,6 +217,10 @@ void compute_node_optimized(GraphNode& node, const std::vector<std::unique_ptr<G
 
         case OpType::INDEX:
             compute_index_node(node, nodes, node_index_map);
+            break;
+
+        case OpType::REPEAT_INTERLEAVE:
+            compute_repeat_interleave_node(node, nodes, node_index_map);
             break;
 
         case OpType::BILINEAR_INTERPOLATION:

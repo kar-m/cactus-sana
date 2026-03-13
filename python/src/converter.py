@@ -43,6 +43,14 @@ def convert_hf_model_weights(model, output_dir, precision='INT8', args=None):
     model_config = extract_base_config(cfg, config)
     model_config['tie_word_embeddings'] = tie_word_embeddings
     model_config['model_type'] = detected_model_type
+    if detected_model_type == 'gemma':
+        # Gemma variants are mixed: some checkpoints export q/k norm weights, others do not.
+        # Keep runtime config aligned to actually exported tensors.
+        has_qk_norm = any(
+            key.endswith("self_attn.q_norm.weight") or key.endswith("self_attn.q_layernorm.weight")
+            for key in state_dict.keys()
+        )
+        model_config['use_qk_norm'] = bool(has_qk_norm)
 
     if is_vlm and vision_cfg is not None:
         model_config.update(extract_vision_config(config, vision_cfg))
